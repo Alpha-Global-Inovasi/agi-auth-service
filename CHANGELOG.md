@@ -1,0 +1,63 @@
+# Changelog
+
+All notable changes to this project are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor version
+may contain breaking changes.
+
+## [0.4.0] - Unreleased
+
+The library is renamed from `cf-auth` to `agi-auth` and is no longer tied to Firebase.
+This release is a breaking redesign.
+
+### Added
+
+- `Verifier`: verifies tokens from several trusted issuers, each with its own audience,
+  algorithm allowlist and key cache.
+- `Issuer`: configure an issuer by hand, from its OpenID Connect discovery document
+  (`Issuer::discover`), from a static JWKS (`jwks_json`), or with the `Issuer::firebase`
+  preset.
+- `Principal`: normalized identity with access to all raw claims.
+- `Issuer::require_type` to accept only RFC 9068 access tokens.
+- `Verifier::refresh_keys` to fetch keys at startup.
+- `AuthError::public_message` and `AuthError::is_server_error`.
+- `agi-auth-actix`: `Authenticate` middleware, `Authenticated` and `MaybeAuthenticated`
+  extractors, and the `AuthResponder` trait for custom error bodies.
+- `native-tls` feature as an alternative to the default `rustls-tls`.
+- JWKS cache: stale-key fallback, single shared refresh, fetch rate limiting, 10 second
+  timeout, response size cap, `Cache-Control: max-age` support.
+
+### Changed
+
+- The repository is a workspace: `agi-auth` (core) and `agi-auth-actix`.
+- Keys are read from standard JWKS documents instead of Google's X.509 endpoint.
+- `aud` may be a string or an array; `auth_time` is optional.
+- An unknown `kid` is answered with 401, unreachable issuer keys with 503 (previously 500).
+- Error responses no longer include internal details.
+- 401 responses carry a `WWW-Authenticate: Bearer` header.
+- License is now `MIT OR Apache-2.0`, copyright PT Alpha Global Inovasi.
+
+### Removed
+
+- Global state and the `FIREBASE_PROJECT_ID` / `FIREBASE_SIGNATURE` environment variables.
+  The application passes configuration to the builder.
+- `verify_token`, `force_refresh_jwks`, `Claims`, `CurrentUser`, `FirebaseClaims`.
+- `firebase_signature_middleware` and `ApiResponse` / `EmptyResponse`.
+
+### Fixed
+
+- `extract_bearer_token` panicked on an `Authorization` header with a multi-byte
+  character in its first seven bytes.
+
+### Migrating from cf-auth 0.3
+
+| cf-auth 0.3 | agi-auth 0.4 |
+|---|---|
+| `FIREBASE_PROJECT_ID` env var | `Issuer::firebase(project_id)` |
+| `verify_token(token)` | `verifier.verify(token)` |
+| `CurrentUser { uid, .. }` | `Principal { subject, .. }` |
+| `user.sign_in_provider` | `agi_auth::firebase::sign_in_provider(&principal)` |
+| `.wrap(from_fn(firebase_auth_middleware))` | `.wrap(Authenticate::required(verifier))` |
+| `.wrap(from_fn(optional_firebase_auth_middleware))` | `.wrap(Authenticate::optional(verifier))` |
+| `AuthenticatedUser`, `OptionalUser` | `Authenticated`, `MaybeAuthenticated` |
+| `force_refresh_jwks()` | `verifier.refresh_keys()` |
