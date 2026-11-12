@@ -16,6 +16,27 @@ use std::future::{Ready, ready};
 
 use actix_web::{FromRequest, HttpRequest, dev::Payload};
 
+/// Build the HTTP response for a failed token verification.
+///
+/// Problems with the token itself (including a `kid` Google does not publish) are 401;
+/// failures on our side (key fetch, configuration) are 500.
+fn verification_error_response(e: &AuthError) -> HttpResponse {
+    use actix_web::http::StatusCode;
+
+    let (status, message) = match e {
+        AuthError::TokenExpired => (StatusCode::UNAUTHORIZED, "Token expired"),
+        AuthError::InvalidSignature | AuthError::KeyNotFound { .. } => {
+            (StatusCode::UNAUTHORIZED, "Invalid token")
+        }
+        AuthError::JwkFetchError(_) | AuthError::ConfigError(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Authentication service error",
+        ),
+        _ => (StatusCode::UNAUTHORIZED, "Authentication failed"),
+    };
+    HttpResponse::build(status).json(ApiResponse::<()>::error(format!("{} - {}", message, e)))
+}
+
 /// Firebase Auth middleware function for use with `actix_web::middleware::from_fn`
 ///
 /// # Usage
@@ -64,24 +85,7 @@ pub async fn firebase_auth_middleware(
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("Token verification failed: {}", e);
-            let (status, message) = match &e {
-                AuthError::TokenExpired => {
-                    (actix_web::http::StatusCode::UNAUTHORIZED, "Token expired")
-                }
-                AuthError::InvalidSignature => {
-                    (actix_web::http::StatusCode::UNAUTHORIZED, "Invalid token")
-                }
-                AuthError::KeyNotFound { .. } | AuthError::JwkFetchError(_) => (
-                    actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "Authentication service error",
-                ),
-                _ => (
-                    actix_web::http::StatusCode::UNAUTHORIZED,
-                    "Authentication failed",
-                ),
-            };
-            let response = HttpResponse::build(status)
-                .json(ApiResponse::<()>::error(format!("{} - {}", message, e)));
+            let response = verification_error_response(&e);
             return Ok(req.into_response(response).map_into_boxed_body());
         }
     };
@@ -98,18 +102,17 @@ pub async fn firebase_auth_middleware(
 
 /// Firebase middleware with X-Firebase-Signature header validation
 ///
-/// Reusable accross multiple endpoint that needed the signature
+/// Reusable across multiple endpoints that need the signature
 ///
 /// # Usage
 /// ```rust,ignore
-/// use actix_web::web;
+/// use actix_web::{App, middleware::from_fn, web};
 /// use cf_auth::middleware::firebase_signature_middleware;
 ///
 /// let app = App::new()
-///     .wrap(firebase_signature_middleware)
+///     .wrap(from_fn(firebase_signature_middleware))
 ///     .service(web::scope("/api").service(web::get().to(handler)))
 /// ```
-
 pub async fn firebase_signature_middleware(
     req: ServiceRequest,
     next: actix_web::middleware::Next<impl MessageBody + 'static>,
@@ -192,45 +195,13 @@ pub async fn optional_firebase_auth_middleware(
                 }
                 Err(e) => {
                     tracing::warn!("Optional auth: token validation failed: {}", e);
-                    let (status, message) = match &e {
-                        AuthError::TokenExpired => {
-                            (actix_web::http::StatusCode::UNAUTHORIZED, "Token expired")
-                        }
-                        AuthError::InvalidSignature => {
-                            (actix_web::http::StatusCode::UNAUTHORIZED, "Invalid token")
-                        }
-                        AuthError::KeyNotFound { .. } | AuthError::JwkFetchError(_) => (
-                            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            "Authentication service error",
-                        ),
-                        _ => (
-                            actix_web::http::StatusCode::UNAUTHORIZED,
-                            "Authentication failed",
-                        ),
-                    };
-                    let response = HttpResponse::build(status)
-                        .json(ApiResponse::<()>::error(format!("{} - {}", message, e)));
+                    let response = verification_error_response(&e);
                     return Ok(req.into_response(response).map_into_boxed_body());
                 }
             },
             Err(e) => {
-                // If header is present but not a valid Bearer token, we might choose to ignore or reject.
-                // Given "optional" usually implies "if you try to auth, do it right", rejecting bad formats is safer.
-                // However, some might argue if it's not Bearer it's not for us.
-                // But extract_bearer_token returns error if it looks like a bearer token but is empty or malformed.
-                // If it doesn't start with Bearer, it returns InvalidAuthHeaderFormat.
-
-                // Let's stick to the plan: "If it looks like a token, validate it".
-                // If it's "Basic ...", extract_bearer_token errors.
-                // If we want to support other auth schemes co-existing, we should check if it starts with Bearer first.
-
-                // Re-reading extract_bearer_token: it checks prefix.
-                // If I send "Basic xyz", extract_bearer_token returns Err.
-                // If the user intends to warn about ANY bad auth header, we return 401.
-                // If we want to allow other schemes to be ignored, we should check prefix.
-
-                // For now, consistent with strict optional auth:
-                // If Authorization header is present, it MUST be valid.
+                // A present Authorization header must be a valid Bearer token; other
+                // schemes are rejected rather than ignored.
                 tracing::warn!("Optional auth: invalid auth header format: {}", e);
                 let response =
                     HttpResponse::Unauthorized().json(ApiResponse::<()>::error(e.to_string()));
@@ -320,7 +291,124 @@ impl FromRequest for OptionalUser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{TEST_KID, TEST_PROJECT, install_test_key, sign, valid_claims};
+    use actix_web::http::StatusCode;
     use actix_web::{App, HttpResponse, test, web};
+
+    fn set_project_env() {
+        // SAFETY: test-only. Every test writes the same value, and nothing in this crate
+        // reads the environment outside std's own (locked) env accessors.
+        unsafe { std::env::set_var("FIREBASE_PROJECT_ID", TEST_PROJECT) };
+    }
+
+    async fn whoami(user: AuthenticatedUser) -> HttpResponse {
+        HttpResponse::Ok().body(user.uid.clone())
+    }
+
+    async fn maybe_whoami(user: OptionalUser) -> HttpResponse {
+        let name = user.as_ref().map_or("anonymous", |u| u.uid.as_str());
+        HttpResponse::Ok().body(name.to_string())
+    }
+
+    fn bearer(token: &str) -> (actix_web::http::header::HeaderName, String) {
+        (AUTHORIZATION, format!("Bearer {token}"))
+    }
+
+    #[actix_web::test]
+    async fn auth_middleware_accepts_valid_token() {
+        set_project_env();
+        install_test_key();
+        let app = test::init_service(
+            App::new()
+                .wrap(actix_web::middleware::from_fn(firebase_auth_middleware))
+                .route("/", web::get().to(whoami)),
+        )
+        .await;
+
+        let token = sign(&valid_claims(), Some(TEST_KID));
+        let req = test::TestRequest::get()
+            .uri("/")
+            .insert_header(bearer(&token))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(test::read_body(resp).await, "user-123");
+    }
+
+    #[actix_web::test]
+    async fn auth_middleware_unknown_kid_is_401() {
+        set_project_env();
+        install_test_key();
+        let app = test::init_service(
+            App::new()
+                .wrap(actix_web::middleware::from_fn(firebase_auth_middleware))
+                .route("/", web::get().to(whoami)),
+        )
+        .await;
+
+        let token = sign(&valid_claims(), Some("no-such-kid"));
+        let req = test::TestRequest::get()
+            .uri("/")
+            .insert_header(bearer(&token))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn auth_middleware_missing_header_is_401() {
+        let app = test::init_service(
+            App::new()
+                .wrap(actix_web::middleware::from_fn(firebase_auth_middleware))
+                .route("/", web::get().to(whoami)),
+        )
+        .await;
+
+        let resp = test::call_service(&app, test::TestRequest::get().uri("/").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn optional_auth_without_header_is_anonymous() {
+        let app = test::init_service(
+            App::new()
+                .wrap(actix_web::middleware::from_fn(
+                    optional_firebase_auth_middleware,
+                ))
+                .route("/", web::get().to(maybe_whoami)),
+        )
+        .await;
+
+        let resp = test::call_service(&app, test::TestRequest::get().uri("/").to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(test::read_body(resp).await, "anonymous");
+    }
+
+    #[actix_web::test]
+    async fn optional_auth_with_valid_token_sets_user() {
+        set_project_env();
+        install_test_key();
+        let app = test::init_service(
+            App::new()
+                .wrap(actix_web::middleware::from_fn(
+                    optional_firebase_auth_middleware,
+                ))
+                .route("/", web::get().to(maybe_whoami)),
+        )
+        .await;
+
+        let token = sign(&valid_claims(), Some(TEST_KID));
+        let req = test::TestRequest::get()
+            .uri("/")
+            .insert_header(bearer(&token))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(test::read_body(resp).await, "user-123");
+    }
 
     #[actix_web::test]
     async fn test_optional_auth_invalid_token_rejects() {

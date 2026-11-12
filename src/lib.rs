@@ -11,7 +11,7 @@
 //! ## Quick Start
 //!
 //! ```rust,ignore
-//! use cf_auth::auth::{verify_token, CurrentUser};
+//! use cf_auth::{AuthError, CurrentUser, verify_token};
 //!
 //! async fn authenticate(token: &str) -> Result<CurrentUser, AuthError> {
 //!     let claims = verify_token(token).await?;
@@ -50,6 +50,9 @@ pub mod response;
 
 #[cfg(feature = "actix")]
 pub mod middleware;
+
+#[cfg(test)]
+mod test_support;
 
 // Re-exports for convenience
 pub use auth::{Claims, CurrentUser, verify_token};

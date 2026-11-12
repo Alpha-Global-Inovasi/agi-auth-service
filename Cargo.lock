@@ -308,7 +308,6 @@ version = "0.3.5"
 dependencies = [
  "actix-web",
  "jsonwebtoken",
- "once_cell",
  "reqwest",
  "serde",
  "serde_json",

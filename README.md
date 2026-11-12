@@ -5,7 +5,7 @@ A shared Rust library for Firebase Authentication, designed for use by multiple 
 ## Features
 
 - 🔐 **JWT Verification** - Verify Firebase ID tokens against Google's public keys
-- 🗄️ **JWK Caching** - Automatic caching with 1-hour TTL and smart refresh
+- 🗄️ **JWK Caching** - Caches Google's keys for the `max-age` Google sends, with a single shared refresh and stale-key fallback when Google is unreachable
 - 🌐 **Actix-web Middleware** - Optional feature flag for Actix integration
 - ⚡ **Framework Agnostic** - Core auth logic works with any Rust framework
 
@@ -104,8 +104,29 @@ async fn mixed_handler(user: OptionalUser) -> String {
 | Middleware                          | Description                        |
 | ----------------------------------- | ---------------------------------- |
 | `firebase_auth_middleware`          | Returns 401 if auth fails          |
-| `optional_firebase_auth_middleware` | Continues without error if no auth |
+| `optional_firebase_auth_middleware` | Continues without error if no auth; 401 if a header is present but invalid |
 | `firebase_signature_middleware`     | Returns 401 if signature fails     |
+
+## Key Caching
+
+Google's public keys are fetched from the `securetoken` x509 endpoint and cached:
+
+- **TTL** follows Google's `Cache-Control: max-age` (1 hour if absent).
+- **One refresh at a time.** Concurrent requests that miss the cache wait for a single fetch.
+- **Stale fallback.** If a refresh fails, expired keys are still used for up to 24 hours, so a Google outage does not take auth down.
+- **Rate limit.** At most one fetch attempt per 60 seconds. A token with an unknown `kid` cannot force repeated fetches.
+- **Timeout.** The fetch times out after 10 seconds.
+
+## HTTP Status Mapping
+
+How the Actix middleware maps verification errors:
+
+| Error                                                            | Status |
+| ---------------------------------------------------------------- | ------ |
+| `TokenExpired`, `InvalidSignature`, `KeyNotFound`, other token errors | 401    |
+| `JwkFetchError`, `ConfigError`                                   | 500    |
+
+`KeyNotFound` means the token's `kid` is not among Google's current keys, so it is treated as a bad token.
 
 ## Error Types
 
@@ -115,6 +136,7 @@ pub enum AuthError {
     InvalidAuthHeaderFormat,
     TokenExpired,
     InvalidSignature,
+    InvalidSignatureHeader,
     IssuerMismatch { expected, actual },
     AudienceMismatch { expected, actual },
     MissingKeyId,
@@ -124,6 +146,15 @@ pub enum AuthError {
     ConfigError(String),
 }
 ```
+
+## Testing
+
+```bash
+cargo test --all-features             # offline; signs tokens with the keys in testdata/
+cargo test --all-features -- --ignored # also fetches Google's real keys (needs network)
+```
+
+The keys in `testdata/` are test fixtures, not secrets.
 
 ## License
 
