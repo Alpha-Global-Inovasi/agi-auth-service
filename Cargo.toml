@@ -1,45 +1,33 @@
-[package]
-name = "cf-auth"
-version = "0.3.5"
+[workspace]
+resolver = "3"
+members = ["crates/agi-auth", "crates/agi-auth-actix"]
+
+[workspace.package]
+version = "0.4.0"
 edition = "2024"
-description = "Firebase Authentication library for Rust services, with optional Actix-web middleware"
-license = "MIT"
-authors = ["Alindra Putra"]
-repository = "https://github.com/Crypto-Foundation-Dev/cf-auth"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["PT Alpha Global Inovasi"]
+repository = "https://github.com/Alpha-Global-Inovasi/agi-auth-service"
+homepage = "https://github.com/Alpha-Global-Inovasi/agi-auth-service"
 
-[features]
-default = []
-actix = ["actix-web"]
-
-[dependencies]
-# Serialization
+[workspace.dependencies]
+agi-auth = { path = "crates/agi-auth", version = "0.4.0", default-features = false }
+actix-web = { version = "4", default-features = false, features = ["macros"] }
+base64 = "0.22"
+jsonwebtoken = "9"
+reqwest = { version = "0.12.28", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-
-# Async mutex for JWK refresh
-tokio = { version = "1", features = ["sync"] }
-
-# HTTP client
-reqwest = { version = "0.12.28", default-features = false, features = [
-    "json",
-    "rustls-tls",
-] }
-
-# JWT Verification
-jsonwebtoken = "9"
-
-# Error handling
 thiserror = "2.0.17"
-
-# Logging
+tokio = { version = "1", features = ["sync"] }
 tracing = "0.1.44"
 
-# Actix
-actix-web = { version = "4", optional = true }
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
 
-# Constant-time comparison (security)
-subtle = "2.6"
-
-[dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
-tracing-subscriber = "0.3.22"
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
