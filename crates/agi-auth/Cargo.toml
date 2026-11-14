@@ -1,0 +1,36 @@
+[package]
+name = "agi-auth"
+description = "Framework-agnostic authentication core for AGI services: multi-issuer OIDC/JWT verification with JWKS caching and a Firebase preset"
+readme = "README.md"
+keywords = ["auth", "jwt", "oidc", "jwks", "firebase"]
+categories = ["authentication", "web-programming"]
+include = ["src/*.rs", "README.md", "LICENSE-MIT", "LICENSE-APACHE"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+default = ["rustls-tls"]
+# TLS backend for fetching discovery and JWKS documents. Enable exactly one.
+rustls-tls = ["reqwest/rustls"]
+native-tls = ["reqwest/native-tls"]
+
+[dependencies]
+base64 = { workspace = true }
+jsonwebtoken = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "time"] }
+
+[lints]
+workspace = true

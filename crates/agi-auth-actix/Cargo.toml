@@ -1,0 +1,32 @@
+[package]
+name = "agi-auth-actix"
+description = "Actix-web middleware and extractors for agi-auth"
+readme = "README.md"
+keywords = ["auth", "actix", "actix-web", "jwt", "middleware"]
+categories = ["authentication", "web-programming::http-server"]
+include = ["src/*.rs", "examples/*.rs", "README.md", "LICENSE-MIT", "LICENSE-APACHE"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+default = ["rustls-tls"]
+rustls-tls = ["agi-auth/rustls-tls"]
+native-tls = ["agi-auth/native-tls"]
+
+[dependencies]
+agi-auth = { workspace = true }
+actix-web = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+jsonwebtoken = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true
