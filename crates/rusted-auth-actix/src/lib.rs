@@ -1,11 +1,11 @@
-//! # agi-auth-actix
+//! # rusted-auth-actix
 //!
-//! Actix-web middleware and extractors for [`agi-auth`](agi_auth).
+//! Actix-web middleware and extractors for [`rusted-auth`](rusted_auth).
 //!
 //! ```rust,no_run
 //! use actix_web::{App, HttpServer, web};
-//! use agi_auth::{Issuer, Verifier};
-//! use agi_auth_actix::{Authenticate, Authenticated};
+//! use rusted_auth::{Issuer, Verifier};
+//! use rusted_auth_actix::{Authenticate, Authenticated};
 //!
 //! async fn me(user: Authenticated) -> String {
 //!     format!("Hello, {}", user.subject)

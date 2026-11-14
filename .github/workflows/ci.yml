@@ -69,7 +69,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Private test keys must not be packaged
         run: |
-          for crate in agi-auth agi-auth-actix; do
+          for crate in rusted-auth rusted-auth-actix; do
             if cargo package -p "$crate" --list --allow-dirty | grep -Ei 'testdata|\.pem$'; then
               echo "::error::$crate would publish test fixtures"
               exit 1

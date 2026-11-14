@@ -1,7 +1,7 @@
 use actix_web::HttpResponse;
 use actix_web::http::StatusCode;
 use actix_web::http::header::{HeaderValue, WWW_AUTHENTICATE};
-use agi_auth::AuthError;
+use rusted_auth::AuthError;
 use std::sync::Arc;
 
 /// Turns an authentication failure into an HTTP response.
@@ -13,8 +13,8 @@ use std::sync::Arc;
 ///
 /// ```rust
 /// use actix_web::HttpResponse;
-/// use agi_auth::AuthError;
-/// use agi_auth_actix::AuthResponder;
+/// use rusted_auth::AuthError;
+/// use rusted_auth_actix::AuthResponder;
 ///
 /// struct PlainText;
 ///

@@ -1,14 +1,14 @@
 //! Public endpoint that personalizes its answer for signed-in callers.
 //!
 //! ```text
-//! FIREBASE_PROJECT_ID=my-project cargo run -p agi-auth-actix --example optional_auth
+//! FIREBASE_PROJECT_ID=my-project cargo run -p rusted-auth-actix --example optional_auth
 //! curl http://127.0.0.1:8080/public
 //! curl -H "Authorization: Bearer <firebase id token>" http://127.0.0.1:8080/public
 //! ```
 
 use actix_web::{App, HttpServer, web};
-use agi_auth::{Issuer, Verifier};
-use agi_auth_actix::{Authenticate, MaybeAuthenticated};
+use rusted_auth::{Issuer, Verifier};
+use rusted_auth_actix::{Authenticate, MaybeAuthenticated};
 
 async fn public_content(user: MaybeAuthenticated) -> String {
     match user.into_inner() {

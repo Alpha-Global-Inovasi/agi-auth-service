@@ -1,6 +1,6 @@
-//! # agi-auth
+//! # rusted-auth
 //!
-//! Framework-agnostic authentication core for AGI services.
+//! Framework-agnostic authentication core for Rust services.
 //!
 //! This release (0.4) provides token verification for any OpenID Connect / JWT issuer:
 //!
@@ -13,14 +13,14 @@
 //! - A normalized [`Principal`] for handlers, and errors that can be shown to clients
 //!   without leaking internals ([`AuthError::public_message`]).
 //!
-//! Web framework adapters live in separate crates (`agi-auth-actix`).
+//! Web framework adapters live in separate crates (`rusted-auth-actix`).
 //!
 //! ## Example
 //!
 //! ```rust,no_run
-//! use agi_auth::{Issuer, Verifier};
+//! use rusted_auth::{Issuer, Verifier};
 //!
-//! # async fn run() -> Result<(), agi_auth::AuthError> {
+//! # async fn run() -> Result<(), rusted_auth::AuthError> {
 //! let verifier = Verifier::builder()
 //!     .issuer(Issuer::firebase("my-firebase-project"))
 //!     .issuer(
@@ -40,7 +40,7 @@
 
 #[cfg(not(any(feature = "rustls-tls", feature = "native-tls")))]
 compile_error!(
-    "agi-auth needs a TLS backend: enable the `rustls-tls` (default) or `native-tls` feature"
+    "rusted-auth needs a TLS backend: enable the `rustls-tls` (default) or `native-tls` feature"
 );
 
 mod algorithm;
