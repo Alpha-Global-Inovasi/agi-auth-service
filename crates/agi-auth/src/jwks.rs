@@ -250,6 +250,7 @@ impl Jwks {
 /// for encryption, name an algorithm we do not accept, or fail to parse. An issuer's set
 /// commonly mixes signing keys with others, and one odd entry must not disable the rest.
 fn parse_jwks(json: &[u8]) -> Result<HashMap<String, SigningKey>, String> {
+    crate::algorithm::ensure_crypto_provider();
     #[derive(Deserialize)]
     struct RawSet {
         keys: Vec<serde_json::Value>,

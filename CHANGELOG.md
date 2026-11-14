@@ -38,6 +38,14 @@ This release is a breaking redesign.
 - License is now `MIT OR Apache-2.0`, copyright PT Alpha Global Inovasi.
 - Minimum supported Rust version is 1.89, required by the patched releases of
   `actix-web` and `actix-http`.
+- Dependencies are on their latest stable releases: `jsonwebtoken` 12, `reqwest` 0.13,
+  `base64` 0.23, `actix-web` 4.19. Minimum versions are raised so applications cannot
+  resolve releases with known advisories.
+- Signatures are checked with aws-lc-rs. agi-auth installs it as jsonwebtoken's crypto
+  provider when the application has not chosen one, so enabling jsonwebtoken's
+  `rust_crypto` feature elsewhere in the dependency graph no longer causes a panic.
+- With `rustls-tls`, certificates are verified against the operating system's trust store
+  instead of a bundled copy of the Mozilla roots.
 
 ### Removed
 

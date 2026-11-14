@@ -77,6 +77,7 @@ impl VerifierBuilder {
     /// has no audience, algorithm or key source, a JWKS URL is not HTTPS, or a static JWKS
     /// document has no usable key.
     pub fn build(self) -> AuthResult<Verifier> {
+        crate::algorithm::ensure_crypto_provider();
         if self.issuers.is_empty() {
             return Err(AuthError::Config("at least one issuer is required".into()));
         }

@@ -13,15 +13,18 @@ homepage = "https://github.com/Alpha-Global-Inovasi/agi-auth-service"
 
 [workspace.dependencies]
 agi-auth = { path = "crates/agi-auth", version = "0.4.0", default-features = false }
-actix-web = { version = "4", default-features = false, features = ["macros"] }
-base64 = "0.22"
-jsonwebtoken = "9"
-reqwest = { version = "0.12.28", default-features = false }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-thiserror = "2.0.17"
-tokio = { version = "1", features = ["sync"] }
+actix-web = { version = "4.19", default-features = false, features = ["macros"] }
+base64 = "0.23.1"
+# aws-lc-rs is the crypto backend shared with reqwest's rustls; `use_pem` (default)
+# is only needed by the tests that sign tokens from PEM keys.
+jsonwebtoken = { version = "12", features = ["aws_lc_rs"] }
+reqwest = { version = "0.13.5", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["sync"] }
 tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

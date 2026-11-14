@@ -16,7 +16,7 @@ homepage.workspace = true
 [features]
 default = ["rustls-tls"]
 # TLS backend for fetching discovery and JWKS documents. Enable exactly one.
-rustls-tls = ["reqwest/rustls-tls"]
+rustls-tls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
 
 [dependencies]
@@ -30,7 +30,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "net", "io-util", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "time"] }
 
 [lints]
 workspace = true

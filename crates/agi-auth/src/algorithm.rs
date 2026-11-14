@@ -55,8 +55,24 @@ impl Algorithm {
             J::ES256 => Self::ES256,
             J::ES384 => Self::ES384,
             J::EdDSA => Self::EdDSA,
-            J::HS256 | J::HS384 | J::HS512 => return None,
+            // HMAC, and any algorithm a future jsonwebtoken release adds, is rejected.
+            _ => return None,
         })
+    }
+}
+
+/// Makes sure jsonwebtoken has a process-wide crypto backend before any key is used.
+///
+/// jsonwebtoken picks its backend from crate features only when exactly one of
+/// `aws_lc_rs` and `rust_crypto` is enabled. Another crate in the application may enable
+/// `rust_crypto` as well, in which case jsonwebtoken would panic on the first signature
+/// check. Installing aws-lc-rs here (the backend agi-auth depends on) avoids that; a
+/// provider the application installed itself is left alone.
+pub(crate) fn ensure_crypto_provider() {
+    use jsonwebtoken::crypto::{CryptoProvider, aws_lc};
+    if CryptoProvider::try_get_default().is_none() {
+        // Losing a race with another installer is fine: either way a provider is set.
+        let _ = aws_lc::DEFAULT_PROVIDER.install_default();
     }
 }
 

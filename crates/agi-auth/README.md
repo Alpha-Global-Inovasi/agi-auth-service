@@ -63,7 +63,7 @@ For Actix-web, use [`agi-auth-actix`](https://crates.io/crates/agi-auth-actix).
 
 | Feature | Default | Effect |
 |---|---|---|
-| `rustls-tls` | yes | Fetch keys over TLS using rustls |
+| `rustls-tls` | yes | Fetch keys over TLS using rustls, verifying certificates against the operating system's trust store |
 | `native-tls` | no | Use the platform TLS library instead |
 
 The library never reads environment variables and keeps no global state. It needs a Tokio runtime.

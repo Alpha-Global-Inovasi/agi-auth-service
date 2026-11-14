@@ -85,7 +85,7 @@ pub(crate) fn sign_hs256(claims: &Value, kid: &str) -> String {
     encode(
         &header,
         claims,
-        &EncodingKey::from_secret(PUBLIC_KEY.as_bytes()),
+        &EncodingKey::from_secret(PUBLIC_KEY.as_bytes()).unwrap(),
     )
     .unwrap()
 }
