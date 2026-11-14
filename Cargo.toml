@@ -7,7 +7,7 @@ version = "0.4.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
-authors = ["PT Alpha Global Inovasi"]
+authors = ["PT Alpha Global Inovasi", "Alindra Putra"]
 repository = "https://github.com/Alpha-Global-Inovasi/agi-auth-service"
 homepage = "https://github.com/Alpha-Global-Inovasi/agi-auth-service"
 

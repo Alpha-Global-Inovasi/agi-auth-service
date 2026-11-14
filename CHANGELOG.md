@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor version
 may contain breaking changes.
 
-## [0.4.0] - Unreleased
+## [0.4.0] - 2026-11-14
 
 The library is renamed from `cf-auth` to `agi-auth` and is no longer tied to Firebase.
 This release is a breaking redesign.
