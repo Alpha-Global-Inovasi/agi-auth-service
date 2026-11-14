@@ -175,32 +175,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agi-auth"
-version = "0.4.0"
-dependencies = [
- "base64",
- "jsonwebtoken",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "agi-auth-actix"
-version = "0.4.0"
-dependencies = [
- "actix-web",
- "agi-auth",
- "jsonwebtoken",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1342,6 +1316,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
+]
+
+[[package]]
+name = "rusted-auth"
+version = "0.4.1"
+dependencies = [
+ "base64",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rusted-auth-actix"
+version = "0.4.1"
+dependencies = [
+ "actix-web",
+ "jsonwebtoken",
+ "rusted-auth",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

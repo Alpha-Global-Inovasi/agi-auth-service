@@ -66,7 +66,7 @@ impl Algorithm {
 /// jsonwebtoken picks its backend from crate features only when exactly one of
 /// `aws_lc_rs` and `rust_crypto` is enabled. Another crate in the application may enable
 /// `rust_crypto` as well, in which case jsonwebtoken would panic on the first signature
-/// check. Installing aws-lc-rs here (the backend agi-auth depends on) avoids that; a
+/// check. Installing aws-lc-rs here (the backend rusted-auth depends on) avoids that; a
 /// provider the application installed itself is left alone.
 pub(crate) fn ensure_crypto_provider() {
     use jsonwebtoken::crypto::{CryptoProvider, aws_lc};

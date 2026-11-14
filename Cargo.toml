@@ -1,18 +1,18 @@
 [workspace]
 resolver = "3"
-members = ["crates/agi-auth", "crates/agi-auth-actix"]
+members = ["crates/rusted-auth", "crates/rusted-auth-actix"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 authors = ["PT Alpha Global Inovasi", "Alindra Putra"]
-repository = "https://github.com/Alpha-Global-Inovasi/agi-auth-service"
-homepage = "https://github.com/Alpha-Global-Inovasi/agi-auth-service"
+repository = "https://github.com/Alpha-Global-Inovasi/rusted-auth"
+homepage = "https://github.com/Alpha-Global-Inovasi/rusted-auth"
 
 [workspace.dependencies]
-agi-auth = { path = "crates/agi-auth", version = "0.4.0", default-features = false }
+rusted-auth = { path = "crates/rusted-auth", version = "0.4.1", default-features = false }
 actix-web = { version = "4.19", default-features = false, features = ["macros"] }
 base64 = "0.23.1"
 # aws-lc-rs is the crypto backend shared with reqwest's rustls; `use_pem` (default)

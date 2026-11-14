@@ -1,15 +1,15 @@
-# agi-auth
+# rusted-auth
 
-Authentication for AGI services, built by PT Alpha Global Inovasi.
+Authentication for Rust services, built by PT Alpha Global Inovasi.
 
 This repository is a Cargo workspace:
 
 | Crate | What it is |
 |---|---|
-| [`agi-auth`](crates/agi-auth) | Framework-agnostic core: verifies tokens from any OpenID Connect / JWT issuer |
-| [`agi-auth-actix`](crates/agi-auth-actix) | Actix-web middleware and extractors |
+| [`rusted-auth`](crates/rusted-auth) | Framework-agnostic core: verifies tokens from any OpenID Connect / JWT issuer |
+| [`rusted-auth-actix`](crates/rusted-auth-actix) | Actix-web middleware and extractors |
 
-Formerly published as `cf-auth` (Firebase only). See the [changelog](CHANGELOG.md) for how to migrate.
+Formerly published as `agi-auth` (0.4.0) and, before that, `cf-auth` (Firebase only). See the [changelog](CHANGELOG.md) for how to migrate.
 
 ## Status
 
@@ -21,14 +21,14 @@ Local login, sessions, MFA and single sign-on modes are planned for later releas
 
 ```toml
 [dependencies]
-agi-auth = "0.4"
-agi-auth-actix = "0.4"
+rusted-auth = "0.4"
+rusted-auth-actix = "0.4"
 ```
 
 ```rust
 use actix_web::{App, HttpServer, web};
-use agi_auth::{Issuer, Verifier};
-use agi_auth_actix::{Authenticate, Authenticated};
+use rusted_auth::{Issuer, Verifier};
+use rusted_auth_actix::{Authenticate, Authenticated};
 
 async fn me(user: Authenticated) -> String {
     format!("Hello, {}", user.subject)

@@ -33,7 +33,7 @@ pub(crate) fn client() -> AuthResult<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(TIMEOUT)
         .redirect(redirects)
-        .user_agent(concat!("agi-auth/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("rusted-auth/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| AuthError::Config(format!("cannot build HTTP client: {e}")))
 }

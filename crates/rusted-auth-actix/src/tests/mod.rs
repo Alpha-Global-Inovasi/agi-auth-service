@@ -2,8 +2,8 @@ use crate::{AuthResponder, Authenticate, Authenticated, MaybeAuthenticated};
 use actix_web::http::StatusCode;
 use actix_web::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use actix_web::{App, HttpResponse, test, web};
-use agi_auth::{AuthError, Issuer, Verifier};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use rusted_auth::{AuthError, Issuer, Verifier};
 use serde_json::{Value, json};
 
 const ISSUER: &str = "https://issuer.test";

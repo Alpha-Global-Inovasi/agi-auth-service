@@ -2,7 +2,7 @@ use crate::responder::SharedResponder;
 use actix_web::dev::Payload;
 use actix_web::error::InternalError;
 use actix_web::{Error, FromRequest, HttpMessage, HttpRequest};
-use agi_auth::{AuthError, Principal};
+use rusted_auth::{AuthError, Principal};
 use std::future::{Ready, ready};
 use std::ops::Deref;
 
@@ -13,7 +13,7 @@ use std::ops::Deref;
 /// or when the middleware is missing.
 ///
 /// ```rust
-/// use agi_auth_actix::Authenticated;
+/// use rusted_auth_actix::Authenticated;
 ///
 /// async fn me(user: Authenticated) -> String {
 ///     format!("Hello, {}", user.subject)

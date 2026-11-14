@@ -1,6 +1,6 @@
 [package]
-name = "agi-auth"
-description = "Framework-agnostic authentication core for AGI services: multi-issuer OIDC/JWT verification with JWKS caching and a Firebase preset"
+name = "rusted-auth"
+description = "Framework-agnostic authentication core for Rust services: multi-issuer OIDC/JWT verification with JWKS caching and a Firebase preset"
 readme = "README.md"
 keywords = ["auth", "jwt", "oidc", "jwks", "firebase"]
 categories = ["authentication", "web-programming"]

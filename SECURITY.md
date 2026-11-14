@@ -1,6 +1,6 @@
 # Security Policy
 
-`agi-auth` is authentication code. We treat every vulnerability report as a priority.
+`rusted-auth` is authentication code. We treat every vulnerability report as a priority.
 
 ## Supported versions
 

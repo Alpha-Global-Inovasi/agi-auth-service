@@ -1,6 +1,6 @@
 [package]
-name = "agi-auth-actix"
-description = "Actix-web middleware and extractors for agi-auth"
+name = "rusted-auth-actix"
+description = "Actix-web middleware and extractors for rusted-auth"
 readme = "README.md"
 keywords = ["auth", "actix", "actix-web", "jwt", "middleware"]
 categories = ["authentication", "web-programming::http-server"]
@@ -15,11 +15,11 @@ homepage.workspace = true
 
 [features]
 default = ["rustls-tls"]
-rustls-tls = ["agi-auth/rustls-tls"]
-native-tls = ["agi-auth/native-tls"]
+rustls-tls = ["rusted-auth/rustls-tls"]
+native-tls = ["rusted-auth/native-tls"]
 
 [dependencies]
-agi-auth = { workspace = true }
+rusted-auth = { workspace = true }
 actix-web = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

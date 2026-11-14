@@ -1,16 +1,16 @@
-# agi-auth
+# rusted-auth
 
-Framework-agnostic authentication core for AGI services.
+Framework-agnostic authentication core for Rust services.
 
 Verifies bearer tokens from any OpenID Connect / JWT issuer and returns a normalized `Principal`. Firebase Authentication is available as a preset, not a requirement.
 
 ```toml
 [dependencies]
-agi-auth = "0.4"
+rusted-auth = "0.4"
 ```
 
 ```rust,no_run
-use agi_auth::{AuthError, Issuer, Principal, Verifier};
+use rusted_auth::{AuthError, Issuer, Principal, Verifier};
 
 async fn build_verifier() -> Result<Verifier, AuthError> {
     Verifier::builder()
@@ -30,7 +30,7 @@ async fn who_is_calling(verifier: &Verifier, authorization: &str) -> Result<Prin
 }
 ```
 
-For Actix-web, use [`agi-auth-actix`](https://crates.io/crates/agi-auth-actix).
+For Actix-web, use [`rusted-auth-actix`](https://crates.io/crates/rusted-auth-actix).
 
 ## Configuring an issuer
 

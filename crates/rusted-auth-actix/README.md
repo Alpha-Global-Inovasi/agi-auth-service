@@ -1,17 +1,17 @@
-# agi-auth-actix
+# rusted-auth-actix
 
-Actix-web middleware and extractors for [`agi-auth`](https://crates.io/crates/agi-auth).
+Actix-web middleware and extractors for [`rusted-auth`](https://crates.io/crates/rusted-auth).
 
 ```toml
 [dependencies]
-agi-auth = "0.4"
-agi-auth-actix = "0.4"
+rusted-auth = "0.4"
+rusted-auth-actix = "0.4"
 ```
 
 ```rust,no_run
 use actix_web::{App, HttpServer, web};
-use agi_auth::{Issuer, Verifier};
-use agi_auth_actix::{Authenticate, Authenticated, MaybeAuthenticated};
+use rusted_auth::{Issuer, Verifier};
+use rusted_auth_actix::{Authenticate, Authenticated, MaybeAuthenticated};
 
 async fn me(user: Authenticated) -> String {
     format!("Hello, {}", user.subject)
@@ -75,8 +75,8 @@ Bodies never contain internal details. The default body is `{"status": false, "m
 
 ```rust
 use actix_web::HttpResponse;
-use agi_auth::AuthError;
-use agi_auth_actix::AuthResponder;
+use rusted_auth::AuthError;
+use rusted_auth_actix::AuthResponder;
 
 struct MyResponder;
 
