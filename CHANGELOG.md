@@ -36,6 +36,8 @@ This release is a breaking redesign.
 - Error responses no longer include internal details.
 - 401 responses carry a `WWW-Authenticate: Bearer` header.
 - License is now `MIT OR Apache-2.0`, copyright PT Alpha Global Inovasi.
+- Minimum supported Rust version is 1.89, required by the patched releases of
+  `actix-web` and `actix-http`.
 
 ### Removed
 

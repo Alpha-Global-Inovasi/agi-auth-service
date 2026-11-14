@@ -73,7 +73,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check                        # licenses and advisories (needs cargo-deny)
 ```
 
-Minimum supported Rust version: 1.85. Raising it is a minor-version change.
+Minimum supported Rust version: 1.89. Raising it is a minor-version change.
 
 ## License
 

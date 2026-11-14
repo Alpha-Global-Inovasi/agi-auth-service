@@ -174,12 +174,12 @@ impl Verifier {
         {
             return Err(AuthError::InvalidClaims("'sub' is empty".into()));
         }
-        if let Some(auth_time) = claims.get("auth_time").and_then(Value::as_u64) {
-            if auth_time > unix_now().saturating_add(config.leeway.as_secs()) {
-                return Err(AuthError::InvalidClaims(
-                    "'auth_time' is in the future".into(),
-                ));
-            }
+        if let Some(auth_time) = claims.get("auth_time").and_then(Value::as_u64)
+            && auth_time > unix_now().saturating_add(config.leeway.as_secs())
+        {
+            return Err(AuthError::InvalidClaims(
+                "'auth_time' is in the future".into(),
+            ));
         }
 
         Ok(Principal::from_claims(claims))
