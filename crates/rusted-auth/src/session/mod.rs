@@ -39,10 +39,12 @@
 //! sessions of an account, and [`SessionManager::revoke_others`] all but the one in use.
 //! [`SessionManager::list`] returns an account's usable sessions without their tokens.
 //!
-//! Sessions in state [`SessionState::PendingMfa`] exist for a second authentication
-//! step. This module can create, check and activate them
-//! ([`SessionManager::validate_pending_mfa`], [`SessionManager::activate`]), but login
-//! does not produce them yet.
+//! Sessions in state [`SessionState::PendingMfa`] wait for a second authentication
+//! step: a password login of an account with TOTP produces one (with the `local` and
+//! `mfa` features), and `mfa::Mfa::complete_login` finishes it.
+//! [`SessionManager::activate`] then revokes the pending session and issues a new active
+//! session with a **new token**, whose absolute lifetime still counts from the pending
+//! session's creation. Clients must replace the token they hold.
 //!
 //! # Audit events and metrics
 //!
@@ -65,7 +67,9 @@ pub(crate) mod token;
 pub(crate) mod user;
 
 pub use error::{BoxError, SessionError, SessionErrorKind};
-pub use event::{AuthEvent, AuthEventKind, EventSink, HashQueueOutcome, LoginFailure};
+pub use event::{
+    AuthEvent, AuthEventKind, EventSink, HashQueueOutcome, LoginFailure, MfaFailure, MfaMethod,
+};
 pub use manager::{AuthenticatedSession, IssuedSession, SessionManager, SessionManagerBuilder};
 pub use memory::{MemorySessionStore, MemoryUserStore};
 pub use model::{

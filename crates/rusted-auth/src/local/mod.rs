@@ -23,7 +23,10 @@
 //!   accounts cost the same hashing work as known ones, every rejection carries the same
 //!   public message, and repeated failures lock the account for a growing period
 //!   ([`LockoutPolicy`]). The email address must be verified before the first login.
-//!   A successful login creates a new session and returns its token ([`Login`]).
+//!   A successful login creates a new session and returns its token ([`Login`]). With
+//!   second factors configured (`LocalAuthBuilder::mfa`, `mfa` feature), an account
+//!   with TOTP gets a session that waits for the second step instead
+//!   ([`Login::mfa_required`]).
 //! - [`LocalAuth::sessions`] gives the [`SessionManager`], which checks the token on
 //!   later requests, lists an account's sessions and revokes them. Sessions are
 //!   described in the [`session`](crate::session) module.

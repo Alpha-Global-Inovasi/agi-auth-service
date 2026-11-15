@@ -174,6 +174,16 @@ impl From<SessionError> for LocalError {
     }
 }
 
+#[cfg(feature = "mfa")]
+impl From<crate::mfa::MfaError> for LocalError {
+    fn from(error: crate::mfa::MfaError) -> Self {
+        match error {
+            crate::mfa::MfaError::Store(source) => Self::Store(source),
+            other => Self::Internal(format!("mfa: {other}")),
+        }
+    }
+}
+
 impl From<StoreError> for LocalError {
     fn from(error: StoreError) -> Self {
         match error {

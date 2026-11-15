@@ -58,13 +58,63 @@ may contain breaking changes.
       effect at once in the process that made it and within the cache lifetime
       (30 seconds) in other processes.
     - `list` returns an account's usable sessions without tokens or hashes.
-    - The `PendingMfa` state with `validate_pending_mfa` and `activate`, as groundwork
-      for multi-factor authentication. Login does not create such sessions yet.
+    - The `PendingMfa` state for logins waiting for a second factor, with
+      `validate_pending_mfa` and `activate`. `activate` revokes the pending session and
+      returns a new active session with a new token (`IssuedSession`); its absolute
+      lifetime still counts from the creation of the pending session.
+      `SessionStore::activate` does this in one atomic step.
   - `EventSink`, a hook for an audit log and metrics: successful and failed logins,
     lockouts, sessions created, activated and revoked, replaced password hashes, and
     how long hashing requests wait in the queue. There is no built-in implementation
     and no dependency on a metrics library; events never contain passwords, tokens or
     hashes.
+- `encryption` cargo feature (off by default) with the `rusted_auth::encryption` module:
+  `Keyring` encrypts secrets at rest with XChaCha20-Poly1305 and a random 192-bit nonce
+  per encryption. It holds several keys with identifiers; the active one encrypts and
+  all of them decrypt, and the key identifier is stored in front of each ciphertext, so
+  keys can be rotated. A caller-supplied context is authenticated with the ciphertext.
+  `Keyring::parse` reads `id:base64key,...` strings; the library reads no environment
+  variables.
+- `mfa` cargo feature (off by default) with the `rusted_auth::mfa` module: TOTP
+  (RFC 6238) and recovery codes, independent of any web framework or database.
+  - `Mfa::start_totp` creates a secret and returns it once with its `otpauth://` URI;
+    `Mfa::confirm_totp` switches TOTP on after one correct code and returns the recovery
+    codes once. An unconfirmed setup does not affect login.
+  - `Mfa::complete_login` takes the token of a pending session and a TOTP code or a
+    recovery code, and returns a new active session under a new token (`MfaLogin`).
+    After 5 wrong codes the pending session is revoked and the user must log in again
+    (`MfaConfig::max_attempts`).
+  - TOTP codes are compared in constant time, accepted for one step either way by
+    default, and accepted once: codes for the last used step or older ones are refused.
+    Defaults are HMAC-SHA-1, 6 digits, 30 seconds and 160-bit secrets (`TotpConfig`).
+  - 10 distinct six-digit recovery codes per set (`MfaConfig::recovery_codes` and
+    `MfaConfig::recovery_code_digits`, 6 to 12 digits), single use. They are stored as
+    HMAC-SHA-256 under a key derived from the `Keyring`, bound to the account. Input of
+    TOTP length is checked as a TOTP code first, then as a recovery code.
+  - A code is used up only after the new session exists, so a login that fails for
+    another reason leaves the code valid.
+  - `Mfa::regenerate_recovery_codes` replaces all recovery codes and `Mfa::disable_totp`
+    deletes the secret and every code. Both take a current TOTP code or an unused
+    recovery code and use it up; after 5 wrong codes per account they are refused for
+    5 minutes. An unfinished setup is removed without a code.
+  - TOTP secrets are stored encrypted with the application's `Keyring`, bound to their
+    account, and re-encrypted with the active key after a rotation when they are next
+    used.
+  - Wrong codes are counted in an `AttemptStore` (`MfaBuilder::attempts`), one atomic
+    "count unless at the limit" step that a single SQL statement can implement. The
+    default `MemoryAttemptStore` counts per process; several processes share a store
+    so that the limits hold across all of them. A failing counter store refuses codes.
+  - `MfaStore` trait for persistence, and `MemoryMfaStore` for tests. `MfaError` with
+    `public_message()` and `kind()`.
+  - With the `local` feature, `LocalAuthBuilder::mfa` makes password logins of accounts
+    with confirmed TOTP return a session in state `PendingMfa` (5 minutes) instead of
+    an active one (`Login::mfa_required`).
+  - New audit events: `MfaSucceeded`, `MfaFailed`, `MfaAttemptsExceeded`,
+    `TotpEnabled`, `TotpDisabled` and `RecoveryCodesGenerated`. `MfaFailed` and
+    `MfaAttemptsExceeded` carry no session for codes that confirm a change.
+    `LoginSucceeded` tells
+    whether the second step is required, and `SessionActivated` names the replaced
+    session. Secrets and codes never appear in events, errors, logs or `Debug` output.
 - `test-util` cargo feature: `PasswordHasher::insecure_for_tests`, a hasher with the
   weakest argon2 parameters so that test suites stay fast. Never enable it in a
   production build.

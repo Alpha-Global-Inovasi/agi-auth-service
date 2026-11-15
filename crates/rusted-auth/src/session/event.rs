@@ -28,8 +28,9 @@ use uuid::Uuid;
 ///   database, push the event onto a channel and write from another task.
 /// - A sink that panics is caught and logged; the operation that reported the event is
 ///   not affected.
-/// - Events never contain passwords, password hashes, session tokens or token hashes, and
-///   never the identifier typed into a failed login (it may be a mistyped password).
+/// - Events never contain passwords, password hashes, session tokens or token hashes,
+///   TOTP secrets, TOTP codes or recovery codes, and never the identifier typed into a
+///   failed login (it may be a mistyped password).
 ///
 /// ```rust
 /// use rusted_auth::session::{AuthEvent, AuthEventKind, EventSink};
@@ -57,7 +58,8 @@ use uuid::Uuid;
 /// ```
 pub trait EventSink: Send + Sync + 'static {
     /// Something worth an audit record happened: a login, a lockout, a session being
-    /// created or revoked.
+    /// created or revoked, a second authentication step, a change to an account's second
+    /// factor.
     fn auth_event(&self, event: &AuthEvent) {
         let _ = event;
     }
@@ -118,6 +120,10 @@ pub enum AuthEventKind {
     LoginSucceeded {
         /// The new session.
         session_id: Uuid,
+        /// `true` when the session waits for a second authentication step, because the
+        /// account has one set up. Its outcome is reported with
+        /// [`MfaSucceeded`](Self::MfaSucceeded) or [`MfaFailed`](Self::MfaFailed).
+        mfa_required: bool,
     },
     /// A login was rejected.
     LoginFailed {
@@ -144,16 +150,108 @@ pub enum AuthEventKind {
         /// The state it started in.
         state: SessionState,
     },
-    /// A session waiting for its second authentication step became active.
+    /// A session passed its second authentication step and was replaced by an active
+    /// session with a new token.
     SessionActivated {
-        /// The session.
+        /// The new, active session.
         session_id: Uuid,
+        /// The pending session it replaced, now revoked. No separate
+        /// [`SessionRevoked`](Self::SessionRevoked) event is reported for it.
+        previous_session_id: Uuid,
     },
     /// A session was revoked. Revoking several sessions reports one event each.
     SessionRevoked {
         /// The session.
         session_id: Uuid,
     },
+    /// The second authentication step of a login succeeded. Reported after
+    /// [`SessionActivated`](Self::SessionActivated).
+    MfaSucceeded {
+        /// The new, active session.
+        session_id: Uuid,
+        /// How the step was completed.
+        method: MfaMethod,
+    },
+    /// A second-factor code was rejected: for the second step of a login, or to confirm
+    /// switching TOTP off or replacing the recovery codes. The code itself is never part
+    /// of the event.
+    MfaFailed {
+        /// The session waiting for the step, or `None` when the code confirmed a change to
+        /// the account's second factor.
+        session_id: Option<Uuid>,
+        /// What kind of code was entered, or `None` when it had the shape of neither.
+        /// Input that has the shape of both is reported as a TOTP code.
+        method: Option<MfaMethod>,
+        /// Why it was rejected.
+        reason: MfaFailure,
+        /// Rejected codes so far for this session (or, for a change, for the account in
+        /// the current window), including this one.
+        attempts: u32,
+    },
+    /// Too many codes were rejected. For a login, its pending session was revoked and the
+    /// user has to log in again; this is reported after the last
+    /// [`MfaFailed`](Self::MfaFailed) and before the
+    /// [`SessionRevoked`](Self::SessionRevoked) event. For a change to the account's
+    /// second factor, further codes are refused for a few minutes.
+    MfaAttemptsExceeded {
+        /// The revoked session, or `None` for a change to the account's second factor.
+        session_id: Option<Uuid>,
+        /// Rejected codes.
+        attempts: u32,
+    },
+    /// A TOTP authenticator was confirmed and is now required at login.
+    TotpEnabled,
+    /// TOTP was switched off and its secret and recovery codes deleted.
+    TotpDisabled,
+    /// A new set of recovery codes replaced all earlier ones.
+    RecoveryCodesGenerated {
+        /// Codes in the new set.
+        count: usize,
+    },
+}
+
+/// A way to complete the second authentication step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MfaMethod {
+    /// A code from an authenticator app (TOTP).
+    Totp,
+    /// A single-use recovery code.
+    RecoveryCode,
+}
+
+impl MfaMethod {
+    /// A stable snake_case name, suitable for event metadata or a metric label.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Totp => "totp",
+            Self::RecoveryCode => "recovery_code",
+        }
+    }
+}
+
+/// Why a code for the second authentication step was rejected. For logs and metrics
+/// only: the client gets the same message for all of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MfaFailure {
+    /// The code is wrong, malformed, or the recovery code does not exist or was used.
+    InvalidCode,
+    /// The TOTP code is right but was already used, or is older than one already used.
+    ReusedCode,
+    /// The account has no confirmed second factor any more.
+    NotEnabled,
+}
+
+impl MfaFailure {
+    /// A stable snake_case name, suitable for event metadata or a metric label.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::InvalidCode => "invalid_code",
+            Self::ReusedCode => "reused_code",
+            Self::NotEnabled => "not_enabled",
+        }
+    }
 }
 
 impl AuthEventKind {
@@ -168,6 +266,12 @@ impl AuthEventKind {
             Self::SessionCreated { .. } => "session_created",
             Self::SessionActivated { .. } => "session_activated",
             Self::SessionRevoked { .. } => "session_revoked",
+            Self::MfaSucceeded { .. } => "mfa_succeeded",
+            Self::MfaFailed { .. } => "mfa_failed",
+            Self::MfaAttemptsExceeded { .. } => "mfa_attempts_exceeded",
+            Self::TotpEnabled => "totp_enabled",
+            Self::TotpDisabled => "totp_disabled",
+            Self::RecoveryCodesGenerated { .. } => "recovery_codes_generated",
         }
     }
 }
@@ -255,6 +359,7 @@ pub(crate) mod testing {
         waits: Arc<Mutex<Vec<(Duration, HashQueueOutcome)>>>,
     }
 
+    #[allow(dead_code)] // Each feature combination uses a different subset.
     impl Recorder {
         pub(crate) fn events(&self) -> Vec<AuthEvent> {
             self.events.lock().unwrap().clone()
@@ -270,7 +375,6 @@ pub(crate) mod testing {
             std::mem::take(&mut *self.events.lock().unwrap())
         }
 
-        #[cfg_attr(not(feature = "local"), allow(dead_code))]
         pub(crate) fn waits(&self) -> Vec<(Duration, HashQueueOutcome)> {
             self.waits.lock().unwrap().clone()
         }
