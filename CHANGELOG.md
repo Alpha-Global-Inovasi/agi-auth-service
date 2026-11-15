@@ -13,7 +13,8 @@ may contain breaking changes.
   with a username, an email address and a password, independent of any web framework or
   database.
   - `LocalAuth::register` and `LocalAuth::login`. Login accepts a username or an email
-    address.
+    address, and a successful login creates a new session and returns its token
+    (`Login`).
   - `UserStore` trait for persistence, and `MemoryUserStore` for tests.
   - `PasswordHasher`: argon2id with the OWASP parameters (m = 19 MiB, t = 2, p = 1).
     At most 8 hashes run at once on dedicated threads, and a request that waits more
@@ -34,6 +35,32 @@ may contain breaking changes.
   - Login requires a verified email address (`LocalError::EmailNotVerified`).
     `LocalAuthBuilder::require_verified_email(false)` turns this off for development.
   - `LocalError` with `public_message()` and `kind()`.
+  - Sessions, through `SessionManager` (`LocalAuth::sessions`):
+    - Opaque tokens of 256 random bits, formatted `rusted_s_` plus 43 base64url
+      characters (secret-scanner pattern `rusted_s_[A-Za-z0-9_-]{43}`). Only the SHA-256
+      hash is stored; the token is returned once and never logged or shown by `Debug`.
+    - `SessionStore` trait for persistence, and `MemorySessionStore` for tests.
+    - Default lifetimes: web sessions end after 7 days without use or 30 days in total,
+      mobile sessions after 30 and 90 days, and sessions waiting for a second
+      authentication step after 5 minutes. All are set with `SessionConfig`.
+    - `validate` rejects malformed, unknown, expired and revoked tokens and sessions of
+      disabled accounts. Validated sessions are cached in memory for 30 seconds without
+      depending on an async runtime, and `last_seen_at` is written at most once per
+      minute.
+    - `revoke`, `revoke_for_user`, `revoke_all` and `revoke_others`. A revocation takes
+      effect at once in the process that made it and within the cache lifetime
+      (30 seconds) in other processes.
+    - `list` returns an account's usable sessions without tokens or hashes.
+    - The `PendingMfa` state with `validate_pending_mfa` and `activate`, as groundwork
+      for multi-factor authentication. Login does not create such sessions yet.
+  - A password hash made with other parameters than the current ones is replaced at the
+    next successful login (`PasswordHasher::needs_rehash`,
+    `UserStore::replace_password_hash`). A failed replacement does not fail the login.
+  - `EventSink`, a hook for an audit log and metrics: successful and failed logins,
+    lockouts, sessions created, activated and revoked, replaced password hashes, and
+    how long hashing requests wait in the queue. There is no built-in implementation
+    and no dependency on a metrics library; events never contain passwords, tokens or
+    hashes.
 - `test-util` cargo feature: `PasswordHasher::insecure_for_tests`, a hasher with the
   weakest argon2 parameters so that test suites stay fast. Never enable it in a
   production build.

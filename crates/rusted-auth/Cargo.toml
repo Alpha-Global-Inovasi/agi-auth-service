@@ -18,8 +18,16 @@ default = ["rustls-tls"]
 # TLS backend for fetching discovery and JWKS documents. Enable exactly one.
 rustls-tls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
-# Local accounts: password hashing (argon2id), registration and login.
-local = ["dep:argon2", "dep:unicode-normalization", "dep:uuid", "dep:zeroize"]
+# Local accounts: password hashing (argon2id), registration, login and sessions.
+local = [
+    "dep:argon2",
+    "dep:getrandom",
+    "dep:sha2",
+    "dep:subtle",
+    "dep:unicode-normalization",
+    "dep:uuid",
+    "dep:zeroize",
+]
 # Test helpers for `local`, such as a password hasher with cheap parameters.
 # Never enable this in a production build.
 test-util = ["local"]
@@ -27,10 +35,13 @@ test-util = ["local"]
 [dependencies]
 argon2 = { workspace = true, optional = true }
 base64 = { workspace = true }
+getrandom = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true, optional = true }
+subtle = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

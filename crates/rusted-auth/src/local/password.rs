@@ -1,6 +1,7 @@
 //! Password policy and argon2id hashing with bounded concurrency.
 
 use super::error::LocalError;
+use super::event::{EventSink, Events, HashQueueOutcome};
 use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{self, PasswordHasher as _, PasswordVerifier as _};
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -160,6 +161,7 @@ struct Inner {
     /// that the attempt costs the same.
     dummy_hash: String,
     pool: Mutex<Pool>,
+    events: Events,
 }
 
 struct Pool {
@@ -193,9 +195,24 @@ impl PasswordHasher {
 
     /// A hasher with custom limits. See [`PasswordHasher::new`].
     pub fn with_limits(limits: HashLimits) -> Result<Self, LocalError> {
+        Self::production(limits, Events::default())
+    }
+
+    /// A hasher that reports how long each request waited for a worker to
+    /// [`EventSink::hash_queue_wait`]. Otherwise like
+    /// [`with_limits`](Self::with_limits).
+    ///
+    /// The hasher that [`LocalAuth`](super::LocalAuth) creates for itself already
+    /// reports to the sink of its session manager; this is for a hasher you build
+    /// yourself to share between components.
+    pub fn with_events(limits: HashLimits, sink: impl EventSink) -> Result<Self, LocalError> {
+        Self::production(limits, Events::new(sink))
+    }
+
+    pub(crate) fn production(limits: HashLimits, events: Events) -> Result<Self, LocalError> {
         let params = Params::new(MEMORY_KIB, ITERATIONS, PARALLELISM, None)
             .map_err(|e| LocalError::Internal(format!("argon2 parameters: {e}")))?;
-        Self::with_params(params, limits)
+        Self::with_params(params, limits, events)
     }
 
     /// A hasher with the weakest argon2 parameters, so tests do not spend their time
@@ -204,9 +221,20 @@ impl PasswordHasher {
     /// Available with the `test-util` cargo feature. **Never use it outside tests.**
     #[cfg(any(test, feature = "test-util"))]
     pub fn insecure_for_tests(limits: HashLimits) -> Result<Self, LocalError> {
-        let params = Params::new(Params::MIN_M_COST, 1, 1, None)
+        Self::insecure(1, limits, Events::default())
+    }
+
+    /// A cheap hasher with `iterations` passes, so tests can make hashes whose
+    /// parameters differ, and an event sink.
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn insecure(
+        iterations: u32,
+        limits: HashLimits,
+        events: Events,
+    ) -> Result<Self, LocalError> {
+        let params = Params::new(Params::MIN_M_COST, iterations, 1, None)
             .map_err(|e| LocalError::Internal(format!("argon2 parameters: {e}")))?;
-        Self::with_params(params, limits)
+        Self::with_params(params, limits, events)
     }
 
     /// Occupies one worker until the returned sender is used or dropped. Returns once
@@ -237,7 +265,7 @@ impl PasswordHasher {
         self.submit(|| Ok(())).unwrap()
     }
 
-    fn with_params(params: Params, limits: HashLimits) -> Result<Self, LocalError> {
+    fn with_params(params: Params, limits: HashLimits, events: Events) -> Result<Self, LocalError> {
         let limits = limits.max_concurrent(limits.max_concurrent);
         let dummy_password = Zeroizing::new(uuid::Uuid::new_v4().to_string());
         let dummy_hash = hash_blocking(&params, &dummy_password)?;
@@ -250,6 +278,7 @@ impl PasswordHasher {
                     active: 0,
                     queue: VecDeque::new(),
                 }),
+                events,
             }),
         })
     }
@@ -288,6 +317,27 @@ impl PasswordHasher {
         let password = normalize(password);
         let hash = hash.to_owned();
         self.run(move || verify_blocking(&password, &hash)).await
+    }
+
+    /// Whether `hash` was made with other parameters than this hasher uses now, so that
+    /// it should be replaced the next time the password is known.
+    ///
+    /// Compares the algorithm, its version, and the memory, iteration and parallelism
+    /// costs. Returns `false` for a string that cannot be parsed: there is nothing to
+    /// upgrade it from.
+    pub fn needs_rehash(&self, hash: &str) -> bool {
+        let Ok(parsed) = PasswordHash::new(hash) else {
+            return false;
+        };
+        let current = &self.inner.params;
+        let same_algorithm = parsed.algorithm.as_str() == Algorithm::Argon2id.ident().as_str()
+            && parsed.version == Some(Version::V0x13.into());
+        let same_costs = Params::try_from(&parsed).is_ok_and(|stored| {
+            stored.m_cost() == current.m_cost()
+                && stored.t_cost() == current.t_cost()
+                && stored.p_cost() == current.p_cost()
+        });
+        !(same_algorithm && same_costs)
     }
 
     /// Spend the same effort as [`verify`](Self::verify) without a real hash, for logins
@@ -340,6 +390,9 @@ impl PasswordHasher {
             if pool.queue.len() >= self.inner.limits.max_queued {
                 drop(pool);
                 tracing::warn!("password hashing queue is full");
+                self.inner
+                    .events
+                    .hash_queue_wait(Duration::ZERO, HashQueueOutcome::Rejected);
                 return Err(LocalError::Busy);
             }
             pool.queue.push_back(job);
@@ -369,6 +422,8 @@ impl Inner {
 
     /// Worker thread body: run `first`, then queued jobs until none are left.
     fn work(&self, first: Job) {
+        self.events
+            .hash_queue_wait(first.queued_at.elapsed(), HashQueueOutcome::Started);
         (first.run)(false);
         loop {
             let job = {
@@ -389,6 +444,12 @@ impl Inner {
                     "password hashing request waited too long"
                 );
             }
+            let outcome = if waited_too_long {
+                HashQueueOutcome::Rejected
+            } else {
+                HashQueueOutcome::Started
+            };
+            self.events.hash_queue_wait(waited, outcome);
             (job.run)(waited_too_long);
         }
     }
@@ -548,6 +609,71 @@ mod tests {
 
         let error = hasher.verify("correct horse", "not-a-hash").await;
         assert!(matches!(error, Err(LocalError::Internal(_))));
+    }
+
+    #[tokio::test]
+    async fn outdated_parameters_are_detected() {
+        let current = hasher(HashLimits::default());
+        let stronger =
+            PasswordHasher::insecure(2, HashLimits::default(), Events::default()).unwrap();
+
+        let own = current.hash("correct horse").await.unwrap();
+        let other = stronger.hash("correct horse").await.unwrap();
+        assert!(!current.needs_rehash(&own));
+        assert!(current.needs_rehash(&other));
+        assert!(stronger.needs_rehash(&own));
+        assert!(!stronger.needs_rehash(&other));
+
+        // Another algorithm or version with the same costs is outdated too.
+        assert!(current.needs_rehash(&own.replace("$argon2id$", "$argon2i$")));
+        assert!(current.needs_rehash(&own.replace("$v=19$", "$v=16$")));
+        assert!(!current.needs_rehash("not-a-hash"));
+
+        // Production hashes are outdated for a test hasher and the reverse.
+        let production = PasswordHasher::new().unwrap();
+        assert!(production.needs_rehash(&own));
+        let real = production.hash("correct horse").await.unwrap();
+        assert!(!production.needs_rehash(&real));
+    }
+
+    #[tokio::test]
+    async fn queue_waits_are_reported() {
+        let recorder = crate::local::event::testing::Recorder::default();
+        let limits = HashLimits::default()
+            .max_concurrent(1)
+            .max_queued(1)
+            .max_wait(Duration::from_millis(20));
+        let hasher = PasswordHasher::insecure(1, limits, Events::new(recorder.clone())).unwrap();
+
+        hasher.hash("correct horse").await.unwrap();
+        assert_eq!(recorder.waits().len(), 1);
+        assert_eq!(recorder.waits()[0].1, HashQueueOutcome::Started);
+
+        let (release, blocked) = hasher.occupy_worker();
+        let queued = hasher.queue_noop();
+        // The queue is full: refused at once, with no wait.
+        assert!(matches!(
+            hasher.hash("correct horse").await,
+            Err(LocalError::Busy)
+        ));
+        std::thread::sleep(Duration::from_millis(60));
+        release.send(()).unwrap();
+        blocked.await.unwrap().unwrap();
+        assert!(matches!(queued.await.unwrap(), Err(LocalError::Busy)));
+
+        let waits = recorder.waits();
+        let outcomes: Vec<_> = waits.iter().map(|(_, outcome)| *outcome).collect();
+        assert_eq!(
+            outcomes,
+            [
+                HashQueueOutcome::Started,
+                HashQueueOutcome::Started,
+                HashQueueOutcome::Rejected,
+                HashQueueOutcome::Rejected,
+            ]
+        );
+        assert_eq!(waits[2].0, Duration::ZERO);
+        assert!(waits[3].0 >= Duration::from_millis(20), "{:?}", waits[3].0);
     }
 
     #[tokio::test]
