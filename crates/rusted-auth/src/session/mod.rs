@@ -58,6 +58,7 @@
 //! `Display` is for logs, `public_message()` is for clients, and `kind()` picks a status
 //! code. Session tokens and their hashes never appear in errors, logs or `Debug` output.
 
+pub(crate) mod attempts;
 mod error;
 pub(crate) mod event;
 pub(crate) mod manager;
@@ -66,6 +67,7 @@ pub(crate) mod model;
 pub(crate) mod token;
 pub(crate) mod user;
 
+pub use attempts::{AttemptScope, AttemptStore, MemoryAttemptStore};
 pub use error::{BoxError, SessionError, SessionErrorKind};
 pub use event::{
     AuthEvent, AuthEventKind, EventSink, HashQueueOutcome, LoginFailure, MfaFailure, MfaMethod,

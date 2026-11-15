@@ -100,7 +100,7 @@ may contain breaking changes.
   - TOTP secrets are stored encrypted with the application's `Keyring`, bound to their
     account, and re-encrypted with the active key after a rotation when they are next
     used.
-  - Wrong codes are counted in an `AttemptStore` (`MfaBuilder::attempts`), one atomic
+  - Wrong codes are counted in a `session::AttemptStore` (`MfaBuilder::attempts`), one atomic
     "count unless at the limit" step that a single SQL statement can implement. The
     default `MemoryAttemptStore` counts per process; several processes share a store
     so that the limits hold across all of them. A failing counter store refuses codes.

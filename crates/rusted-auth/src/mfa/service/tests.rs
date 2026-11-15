@@ -1240,8 +1240,8 @@ mod activation {
 
 mod shared_attempts {
     use super::*;
-    use crate::mfa::{AttemptScope, AttemptStore, MemoryAttemptStore};
     use crate::session::StoreError;
+    use crate::session::{AttemptScope, AttemptStore, MemoryAttemptStore};
 
     fn process(f: &Fixture, attempts: &MemoryAttemptStore) -> TestMfa {
         let clock = f.clock.clone();
