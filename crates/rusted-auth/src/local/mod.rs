@@ -18,6 +18,15 @@
 //!   public message, and repeated failures lock the account for a growing period
 //!   ([`LockoutPolicy`]). The email address must be verified before the first login.
 //!
+//! # Limits of hiding registered email addresses
+//!
+//! Registration does not reveal directly whether an email address has an account, but a
+//! determined caller can still find out at the cost of one registration per address:
+//! register with the address and a new username, then try to register that username
+//! again. If it is now taken, the first call created an account, so the address was new.
+//! Usernames are public and must be unique, so this cannot be hidden without reserving
+//! them. Rate limit registration per client address to keep it expensive.
+//!
 //! # Passwords
 //!
 //! Passwords are 8 to 128 characters with no composition rules; the minimum can be raised
