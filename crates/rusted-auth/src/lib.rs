@@ -50,6 +50,8 @@ pub mod firebase;
 mod http;
 mod issuer;
 mod jwks;
+#[cfg(feature = "local")]
+pub mod local;
 mod principal;
 mod verifier;
 
