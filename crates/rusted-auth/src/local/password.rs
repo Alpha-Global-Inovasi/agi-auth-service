@@ -237,8 +237,8 @@ impl PasswordHasher {
         Self::with_params(params, limits, events)
     }
 
-    /// Occupies one worker until the returned sender is used or dropped. Returns once
-    /// the worker has started.
+    /// Occupies one worker until the returned sender is used or dropped. Waits for a free
+    /// worker first and returns once the job has started.
     #[cfg(test)]
     pub(crate) fn occupy_worker(
         &self,
@@ -246,6 +246,12 @@ impl PasswordHasher {
         std::sync::mpsc::Sender<()>,
         oneshot::Receiver<Result<(), LocalError>>,
     ) {
+        // A worker sends its result before it checks the queue and exits, so a request
+        // that just finished can still hold a slot. Wait for that slot instead of being
+        // refused, which made tests depend on thread timing.
+        while self.inner.pool().active >= self.inner.limits.max_concurrent {
+            std::thread::yield_now();
+        }
         let (release, wait) = std::sync::mpsc::channel::<()>();
         let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
         let blocked = self
