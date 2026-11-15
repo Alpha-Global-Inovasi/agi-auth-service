@@ -64,6 +64,8 @@
 //! code. Session tokens and their hashes never appear in errors, logs or `Debug` output.
 
 pub(crate) mod attempts;
+#[cfg(any(test, feature = "test-util"))]
+pub mod conformance;
 mod error;
 pub(crate) mod event;
 pub(crate) mod manager;
