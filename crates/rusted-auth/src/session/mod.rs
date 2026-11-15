@@ -13,6 +13,11 @@
 //! [`SessionManager`] creates sessions, checks the token on later requests, lists an
 //! account's sessions and revokes them.
 //!
+//! The module also holds two stores that more than one way of signing in needs:
+//! [`OneTimeTokenStore`] for the single-use tokens in email links (prefix
+//! [`ONE_TIME_TOKEN_PREFIX`], stored as a SHA-256 hash), and [`AttemptStore`] for
+//! counters of failed attempts, with in-memory implementations for tests.
+//!
 //! # Sessions
 //!
 //! A session token is [`SESSION_TOKEN_PREFIX`] followed by 256 random bits in base64url
@@ -64,13 +69,15 @@ pub(crate) mod event;
 pub(crate) mod manager;
 mod memory;
 pub(crate) mod model;
+pub(crate) mod one_time;
 pub(crate) mod token;
 pub(crate) mod user;
 
 pub use attempts::{AttemptScope, AttemptStore, MemoryAttemptStore};
 pub use error::{BoxError, SessionError, SessionErrorKind};
 pub use event::{
-    AuthEvent, AuthEventKind, EventSink, HashQueueOutcome, LoginFailure, MfaFailure, MfaMethod,
+    AuthEvent, AuthEventKind, EmailKind, EventSink, HashQueueOutcome, LoginFailure, MfaFailure,
+    MfaMethod,
 };
 pub use manager::{AuthenticatedSession, IssuedSession, SessionManager, SessionManagerBuilder};
 pub use memory::{MemorySessionStore, MemoryUserStore};
@@ -78,6 +85,10 @@ pub use model::{
     LAST_SEEN_WRITE_INTERVAL, MAX_SESSION_CACHE_TTL, MAX_USER_AGENT_CHARS, NewSession, Session,
     SessionConfig, SessionContext, SessionKind, SessionLifetime, SessionRecord, SessionState,
     SessionStore,
+};
+pub use one_time::{
+    ConsumedToken, MemoryOneTimeTokenStore, NewOneTimeToken, ONE_TIME_TOKEN_PREFIX, OneTimeToken,
+    OneTimeTokenHash, OneTimeTokenRecord, OneTimeTokenStore, TokenPurpose,
 };
 pub use token::{SESSION_TOKEN_PREFIX, SessionToken, SessionTokenHash};
 pub use user::{NewUser, StoreError, User, UserRecord, UserStore};

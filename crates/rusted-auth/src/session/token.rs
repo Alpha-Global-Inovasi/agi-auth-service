@@ -36,16 +36,9 @@ pub struct SessionToken(Zeroizing<String>);
 impl SessionToken {
     /// A new token from the operating system's random number generator.
     pub(crate) fn generate() -> Result<Self, SessionError> {
-        let mut bytes = Zeroizing::new([0u8; TOKEN_BYTES]);
-        getrandom::fill(bytes.as_mut_slice()).map_err(|e| {
-            SessionError::Internal(format!("system random number generator failed: {e}"))
-        })?;
-        let mut token = Zeroizing::new(String::with_capacity(
-            SESSION_TOKEN_PREFIX.len() + ENCODED_LEN,
-        ));
-        token.push_str(SESSION_TOKEN_PREFIX);
-        URL_SAFE_NO_PAD.encode_string(bytes.as_slice(), &mut token);
-        Ok(Self(token))
+        random_token(SESSION_TOKEN_PREFIX)
+            .map(Self)
+            .map_err(SessionError::Internal)
     }
 
     /// The token text, to put in a cookie or a response body.
@@ -65,17 +58,32 @@ impl fmt::Debug for SessionToken {
     }
 }
 
+/// `prefix` followed by 256 bits from the operating system's random number generator, in
+/// base64url without padding.
+pub(crate) fn random_token(prefix: &str) -> Result<Zeroizing<String>, String> {
+    let mut bytes = Zeroizing::new([0u8; TOKEN_BYTES]);
+    getrandom::fill(bytes.as_mut_slice())
+        .map_err(|e| format!("system random number generator failed: {e}"))?;
+    let mut token = Zeroizing::new(String::with_capacity(prefix.len() + ENCODED_LEN));
+    token.push_str(prefix);
+    URL_SAFE_NO_PAD.encode_string(bytes.as_slice(), &mut token);
+    Ok(token)
+}
+
+/// `true` when `token` is `prefix` followed by [`ENCODED_LEN`] base64url characters.
+pub(crate) fn has_token_shape(token: &str, prefix: &str) -> bool {
+    token.strip_prefix(prefix).is_some_and(|random| {
+        random.len() == ENCODED_LEN
+            && random
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    })
+}
+
 /// `true` when `token` has the shape of a session token. Says nothing about whether a
 /// session exists for it.
 fn is_well_formed(token: &str) -> bool {
-    token
-        .strip_prefix(SESSION_TOKEN_PREFIX)
-        .is_some_and(|random| {
-            random.len() == ENCODED_LEN
-                && random
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        })
+    has_token_shape(token, SESSION_TOKEN_PREFIX)
 }
 
 /// SHA-256 hash of a session token: the only form in which a token is stored.

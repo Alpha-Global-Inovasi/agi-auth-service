@@ -78,6 +78,22 @@ pub enum LocalError {
     #[error("username availability check is disabled")]
     UsernameCheckDisabled,
 
+    /// The link token is wrong, expired or already used, belongs to a disabled account,
+    /// or was sent to an address the account no longer has. All of these have the same
+    /// public message.
+    #[error("invalid or expired token")]
+    InvalidToken,
+
+    /// Too many wrong current passwords were given to change the password. The session
+    /// that made the attempts was revoked.
+    #[error("too many attempts")]
+    TooManyAttempts,
+
+    /// [`LocalAuthBuilder::build`](super::LocalAuthBuilder::build) is missing a required
+    /// part. A programming error, found at startup.
+    #[error("configuration error: {0}")]
+    Configuration(&'static str),
+
     /// Too many passwords are being hashed; the request waited too long or the queue is
     /// full. Adapters answer with HTTP 503.
     #[error("password hashing is at capacity")]
@@ -104,6 +120,10 @@ pub enum LocalErrorKind {
     Conflict,
     /// The operation is switched off by configuration (HTTP 404).
     Disabled,
+    /// The link token cannot be used (HTTP 400).
+    Token,
+    /// Too many attempts (HTTP 429).
+    RateLimited,
     /// The service is at capacity (HTTP 503).
     Busy,
     /// Storage or internal failure (HTTP 500).
@@ -124,9 +144,11 @@ impl LocalError {
             | Self::PasswordTooShort { .. }
             | Self::PasswordTooLong { .. } => LocalErrorKind::Validation,
             Self::UsernameCheckDisabled => LocalErrorKind::Disabled,
+            Self::InvalidToken => LocalErrorKind::Token,
+            Self::TooManyAttempts => LocalErrorKind::RateLimited,
             Self::UsernameTaken | Self::EmailTaken => LocalErrorKind::Conflict,
             Self::Busy => LocalErrorKind::Busy,
-            Self::Store(_) | Self::Internal(_) => LocalErrorKind::Server,
+            Self::Store(_) | Self::Internal(_) | Self::Configuration(_) => LocalErrorKind::Server,
         }
     }
 
@@ -158,8 +180,12 @@ impl LocalError {
             Self::UsernameCheckDisabled => "Not available",
             Self::UsernameTaken => "Username is already taken",
             Self::EmailTaken => "Email is already registered",
+            Self::InvalidToken => "This link is invalid or has expired",
+            Self::TooManyAttempts => "Too many attempts, sign in again",
             Self::Busy => "Service is busy, try again shortly",
-            Self::Store(_) | Self::Internal(_) => "Authentication service unavailable",
+            Self::Store(_) | Self::Internal(_) | Self::Configuration(_) => {
+                "Authentication service unavailable"
+            }
         }
     }
 }

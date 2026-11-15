@@ -20,14 +20,21 @@ pub enum AttemptScope {
     /// Codes that confirm a change to an account's second factor. The key is the
     /// account.
     Change,
+    /// Emails that someone other than the account owner can cause to be sent, such as a
+    /// password reset link. The key is the receiving account.
+    Email,
+    /// Wrong current passwords given to change the password. The key is the account.
+    PasswordChange,
 }
 
 impl AttemptScope {
-    /// The name to store: `login` or `change`.
+    /// The name to store: `login`, `change`, `email` or `password_change`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Login => "login",
             Self::Change => "change",
+            Self::Email => "email",
+            Self::PasswordChange => "password_change",
         }
     }
 }
@@ -167,12 +174,11 @@ impl AttemptStore for MemoryAttemptStore {
     }
 }
 
-#[cfg_attr(not(feature = "mfa"), allow(dead_code))]
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// [`AttemptStore`] without its type, so that the services using it keep their type
 /// parameters.
-#[cfg_attr(not(feature = "mfa"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "local", feature = "mfa")), allow(dead_code))]
 pub(crate) trait DynAttemptStore: Send + Sync {
     fn dyn_begin(
         &self,
@@ -292,5 +298,7 @@ mod tests {
         );
         assert_eq!(AttemptScope::Login.as_str(), "login");
         assert_eq!(scope.as_str(), "change");
+        assert_eq!(AttemptScope::Email.as_str(), "email");
+        assert_eq!(AttemptScope::PasswordChange.as_str(), "password_change");
     }
 }

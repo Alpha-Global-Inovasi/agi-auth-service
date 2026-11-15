@@ -115,9 +115,9 @@ impl StoreError {
 ///   across accounts.
 /// - [`insert`](Self::insert) enforces both uniqueness rules atomically, so two concurrent
 ///   registrations cannot both succeed.
-/// - [`record_failed_login`](Self::record_failed_login) increments atomically, and
+/// - [`record_failed_login`](Self::record_failed_login) increments atomically,
 ///   [`replace_password_hash`](Self::replace_password_hash) compares and replaces
-///   atomically.
+///   atomically, and [`reset_password`](Self::reset_password) is one atomic update.
 pub trait UserStore: Send + Sync + 'static {
     /// Look up an account by username.
     fn find_by_username(
@@ -167,6 +167,32 @@ pub trait UserStore: Send + Sync + 'static {
         current: &str,
         new: String,
     ) -> impl Future<Output = Result<bool, StoreError>> + Send;
+
+    /// Record that the account's email address was verified at `at`, unless a time is
+    /// already recorded. Returns whether the account changed.
+    ///
+    /// For example
+    /// `UPDATE users SET email_verified_at = $at WHERE id = $id AND email_verified_at IS NULL`.
+    /// Returns [`StoreError::NotFound`] when the account does not exist.
+    fn mark_email_verified(
+        &self,
+        id: Uuid,
+        at: SystemTime,
+    ) -> impl Future<Output = Result<bool, StoreError>> + Send;
+
+    /// Set a new password hash after a password reset and clear the lockout state, in
+    /// one step: `password_hash = $hash, failed_login_count = 0, locked_until = NULL`.
+    ///
+    /// Unlike [`replace_password_hash`](Self::replace_password_hash) this does not
+    /// compare first: the user proved control of the email address, so the new
+    /// password wins. A rehash at login that runs at the same time then fails its
+    /// comparison and leaves the new hash in place, as it should.
+    /// Returns [`StoreError::NotFound`] when the account does not exist.
+    fn reset_password(
+        &self,
+        id: Uuid,
+        password_hash: String,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
 #[cfg(test)]

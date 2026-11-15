@@ -37,11 +37,42 @@ may contain breaking changes.
   - A password hash made with other parameters than the current ones is replaced at the
     next successful login (`PasswordHasher::needs_rehash`,
     `UserStore::replace_password_hash`). A failed replacement does not fail the login.
+  - Email verification, password reset and password change:
+    `LocalAuth::verify_email`, `resend_verification`, `request_password_reset`,
+    `reset_password` and `change_password`. A reset revokes every session of the
+    account, clears its lockout and counts the address as verified; a change revokes
+    the other sessions. Neither link signs the user in. Requests for addresses without
+    an account succeed and send nothing.
+  - `Mailer` trait, which the application implements by queueing emails (it must not
+    wait for delivery), and `AuthEmail`, the typed emails it receives: verification and
+    reset links, and notices about a registration with a known address, a lockout and
+    a password change. `LocalAuthBuilder::mailer` is required; `NoMailer` sends
+    nothing. Mailer errors are logged and reported, never returned, so that responses
+    do not reveal registered addresses. With `test-util`, `RecordingMailer` keeps the
+    emails for tests.
+  - Registration sends the verification link to a new account, and a notice to the
+    owner when the address already has one. The owner is also told when the account
+    locks, once per series of failed logins.
+  - The emails others can cause an account to receive are limited to 3 per 15 minutes
+    (`EmailPolicy`); requests over the limit succeed, send nothing and create no new
+    link. Wrong current passwords in `change_password` are counted separately from
+    failed logins (`PasswordChangePolicy`, 5 per 15 minutes); at the limit the calling
+    session is revoked (`LocalError::TooManyAttempts`).
+  - `LocalAuthBuilder::tokens` (required) and `LocalAuthBuilder::attempts`.
+    `LocalError::InvalidToken`, `TooManyAttempts` and `Configuration`.
 - `session` cargo feature (off by default) with the `rusted_auth::session` module: the
   parts every way of signing in shares, without any password code (it does not pull in
   argon2).
   - `User` and the `UserStore` trait for persistence, with `MemoryUserStore` for tests,
-    and `StoreError`.
+    and `StoreError`. `UserStore::mark_email_verified` and `UserStore::reset_password`
+    (a new hash and a cleared lockout in one step).
+  - Single-use tokens for email links (`OneTimeToken`, purposes `verify_email` and
+    `reset_password`): `rusted_t_` plus 43 base64url characters (secret-scanner pattern
+    `rusted_t_[A-Za-z0-9_-]{43}`), stored as a SHA-256 hash together with the address
+    they were sent to. `OneTimeTokenStore` uses a token up in one atomic step;
+    `MemoryOneTimeTokenStore` is for tests.
+  - `AttemptStore`, shared counters of failed attempts with one atomic "count unless at
+    the limit" step, and `MemoryAttemptStore`.
   - Sessions, through `SessionManager` (also reachable as `LocalAuth::sessions`):
     - Opaque tokens of 256 random bits, formatted `rusted_s_` plus 43 base64url
       characters (secret-scanner pattern `rusted_s_[A-Za-z0-9_-]{43}`). Only the SHA-256
@@ -64,7 +95,8 @@ may contain breaking changes.
       lifetime still counts from the creation of the pending session.
       `SessionStore::activate` does this in one atomic step.
   - `EventSink`, a hook for an audit log and metrics: successful and failed logins,
-    lockouts, sessions created, activated and revoked, replaced password hashes, and
+    lockouts, sessions created, activated and revoked, replaced password hashes,
+    password resets and changes, verified addresses, refused and throttled emails, and
     how long hashing requests wait in the queue. There is no built-in implementation
     and no dependency on a metrics library; events never contain passwords, tokens or
     hashes.

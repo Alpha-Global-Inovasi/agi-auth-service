@@ -924,6 +924,8 @@ mod login {
 
     async fn local(f: &Fixture) -> LocalAuth<MemoryUserStore, MemorySessionStore> {
         let auth = LocalAuth::builder(f.users.clone(), f.sessions.clone())
+            .mailer(crate::local::NoMailer)
+            .tokens(crate::session::MemoryOneTimeTokenStore::new())
             .hasher(PasswordHasher::insecure_for_tests(HashLimits::default()).unwrap())
             .mfa(&f.mfa)
             .build()
@@ -1063,6 +1065,8 @@ mod login {
         let (f, _) = fixture().await;
         f.enable().await;
         let plain = LocalAuth::builder(f.users.clone(), f.sessions.clone())
+            .mailer(crate::local::NoMailer)
+            .tokens(crate::session::MemoryOneTimeTokenStore::new())
             .hasher(PasswordHasher::insecure_for_tests(HashLimits::default()).unwrap())
             .build()
             .unwrap();
