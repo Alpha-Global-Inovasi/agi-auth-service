@@ -4,7 +4,7 @@ description = "Framework-agnostic authentication core for Rust services: multi-i
 readme = "README.md"
 keywords = ["auth", "jwt", "oidc", "jwks", "firebase"]
 categories = ["authentication", "web-programming"]
-include = ["src/*.rs", "src/local/*.rs", "README.md", "LICENSE-MIT", "LICENSE-APACHE"]
+include = ["src/*.rs", "src/local/*.rs", "src/session/*.rs", "README.md", "LICENSE-MIT", "LICENSE-APACHE"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,16 +18,11 @@ default = ["rustls-tls"]
 # TLS backend for fetching discovery and JWKS documents. Enable exactly one.
 rustls-tls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
-# Local accounts: password hashing (argon2id), registration, login and sessions.
-local = [
-    "dep:argon2",
-    "dep:getrandom",
-    "dep:sha2",
-    "dep:subtle",
-    "dep:unicode-normalization",
-    "dep:uuid",
-    "dep:zeroize",
-]
+# Sessions, accounts and the audit hook, shared by every way of signing in. Pulls in no
+# password hashing.
+session = ["dep:getrandom", "dep:sha2", "dep:subtle", "dep:uuid", "dep:zeroize"]
+# Local accounts: password hashing (argon2id), registration and login. Builds on `session`.
+local = ["session", "dep:argon2", "dep:unicode-normalization"]
 # Test helpers for `local`, such as a password hasher with cheap parameters.
 # Never enable this in a production build.
 test-util = ["local"]

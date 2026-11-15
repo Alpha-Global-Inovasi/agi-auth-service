@@ -1,6 +1,6 @@
 //! Hooks for audit events and metrics.
 
-use super::session::{SessionKind, SessionState};
+use super::model::{SessionKind, SessionState};
 use std::fmt;
 use std::net::IpAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -17,9 +17,9 @@ use uuid::Uuid;
 ///
 /// Register a sink with
 /// [`SessionManagerBuilder::events`](super::SessionManagerBuilder::events).
-/// [`LocalAuth`](super::LocalAuth) reports to the sink of the session manager it was
-/// built with, and so does the password hasher it creates. A hasher you build yourself
-/// takes its sink from [`PasswordHasher::with_events`](super::PasswordHasher::with_events).
+/// `local::LocalAuth` reports to the sink of the session manager it was built with, and
+/// so does the password hasher it creates. A hasher you build yourself takes its sink
+/// from `local::PasswordHasher::with_events`.
 ///
 /// # Contract
 ///
@@ -32,7 +32,7 @@ use uuid::Uuid;
 ///   never the identifier typed into a failed login (it may be a mistyped password).
 ///
 /// ```rust
-/// use rusted_auth::local::{AuthEvent, AuthEventKind, EventSink};
+/// use rusted_auth::session::{AuthEvent, AuthEventKind, EventSink};
 /// use std::sync::atomic::{AtomicU64, Ordering};
 ///
 /// #[derive(Default)]
@@ -86,7 +86,7 @@ impl<T: EventSink + ?Sized> EventSink for Arc<T> {
 pub enum HashQueueOutcome {
     /// A worker picked the request up.
     Started,
-    /// The request was refused with [`LocalError::Busy`](super::LocalError::Busy).
+    /// The request was refused with `local::LocalError::Busy`.
     Rejected,
 }
 
@@ -219,6 +219,7 @@ impl Events {
         }
     }
 
+    #[cfg_attr(not(feature = "local"), allow(dead_code))]
     pub(crate) fn hash_queue_wait(&self, waited: Duration, outcome: HashQueueOutcome) {
         if let Some(sink) = &self.0 {
             guarded(|| sink.hash_queue_wait(waited, outcome));
@@ -269,6 +270,7 @@ pub(crate) mod testing {
             std::mem::take(&mut *self.events.lock().unwrap())
         }
 
+        #[cfg_attr(not(feature = "local"), allow(dead_code))]
         pub(crate) fn waits(&self) -> Vec<(Duration, HashQueueOutcome)> {
             self.waits.lock().unwrap().clone()
         }

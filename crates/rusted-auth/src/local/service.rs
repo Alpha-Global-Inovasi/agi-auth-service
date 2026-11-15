@@ -1,11 +1,11 @@
 use super::error::LocalError;
-use super::event::{AuthEvent, AuthEventKind, Events, LoginFailure};
-use super::manager::{Clock, SessionManager};
 use super::password::{HashLimits, PasswordHasher, PasswordPolicy};
-use super::session::{Session, SessionContext, SessionState, SessionStore};
-use super::token::SessionToken;
-use super::user::{NewUser, StoreError, User, UserRecord, UserStore};
 use super::validate;
+use crate::session::event::{AuthEvent, AuthEventKind, Events, LoginFailure};
+use crate::session::manager::{Clock, SessionManager};
+use crate::session::model::{Session, SessionContext, SessionState, SessionStore};
+use crate::session::token::SessionToken;
+use crate::session::user::{NewUser, StoreError, User, UserRecord, UserStore};
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -145,9 +145,9 @@ pub struct Login {
 /// Cheap to clone; clones share the stores, the session manager and the password hasher.
 ///
 /// ```rust
-/// use rusted_auth::local::{
-///     LocalAuth, MemorySessionStore, MemoryUserStore, Registration, SessionContext,
-///     SessionManager,
+/// use rusted_auth::local::{LocalAuth, Registration};
+/// use rusted_auth::session::{
+///     MemorySessionStore, MemoryUserStore, SessionContext, SessionManager,
 /// };
 /// use std::time::SystemTime;
 ///
@@ -322,7 +322,7 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
     /// through `sessions`.
     ///
     /// Login events are reported to the event sink of `sessions`
-    /// ([`SessionManagerBuilder::events`](super::SessionManagerBuilder::events)).
+    /// ([`SessionManagerBuilder::events`](crate::session::SessionManagerBuilder::events)).
     pub fn builder(store: U, sessions: SessionManager<S>) -> LocalAuthBuilder<U, S> {
         LocalAuthBuilder {
             store,
@@ -633,8 +633,8 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::event::testing::Recorder;
-    use crate::local::{MemorySessionStore, MemoryUserStore, SessionError, SessionKind};
+    use crate::session::event::testing::Recorder;
+    use crate::session::{MemorySessionStore, MemoryUserStore, SessionError, SessionKind};
     use std::sync::Mutex;
 
     type TestAuth = LocalAuth<MemoryUserStore, MemorySessionStore>;

@@ -2,7 +2,7 @@
 
 use super::error::SessionError;
 use super::event::{AuthEvent, AuthEventKind, EventSink, Events};
-use super::session::{
+use super::model::{
     LAST_SEEN_WRITE_INTERVAL, MAX_SESSION_CACHE_TTL, NewSession, Session, SessionConfig,
     SessionContext, SessionKind, SessionState, SessionStore, after,
 };
@@ -66,12 +66,12 @@ pub struct AuthenticatedSession {
 /// ([`LAST_SEEN_WRITE_INTERVAL`]).
 ///
 /// ```rust
-/// use rusted_auth::local::{
+/// use rusted_auth::session::{
 ///     MemorySessionStore, MemoryUserStore, SessionContext, SessionManager, SessionState,
 /// };
-/// # use rusted_auth::local::Uuid;
+/// # use rusted_auth::session::Uuid;
 ///
-/// # async fn run(user_id: Uuid) -> Result<(), rusted_auth::local::SessionError> {
+/// # async fn run(user_id: Uuid) -> Result<(), rusted_auth::session::SessionError> {
 /// let users = MemoryUserStore::new();
 /// let sessions = SessionManager::new(MemorySessionStore::new(users));
 ///
@@ -202,6 +202,7 @@ impl<S: SessionStore> SessionManager<S> {
         self.inner.config
     }
 
+    #[cfg_attr(not(feature = "local"), allow(dead_code))]
     pub(crate) fn events(&self) -> &Events {
         &self.inner.events
     }
@@ -210,7 +211,7 @@ impl<S: SessionStore> SessionManager<S> {
     ///
     /// Every call makes a new session with a new random token; an existing session is
     /// never reused or extended. This does not check that the account may sign in: that
-    /// is the caller's job ([`LocalAuth::login`](super::LocalAuth::login) does it).
+    /// is the caller's job (`local::LocalAuth::login` does it).
     ///
     /// An [`Active`](SessionState::Active) session gets the lifetime of its kind. A
     /// [`PendingMfa`](SessionState::PendingMfa) session lasts
@@ -619,9 +620,9 @@ fn judge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::event::testing::Recorder;
-    use crate::local::session::{SessionLifetime, SessionRecord};
-    use crate::local::{MemorySessionStore, MemoryUserStore, NewUser, UserStore};
+    use crate::session::event::testing::Recorder;
+    use crate::session::model::{SessionLifetime, SessionRecord};
+    use crate::session::{MemorySessionStore, MemoryUserStore, NewUser, UserStore};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     const MINUTE: Duration = Duration::from_secs(60);

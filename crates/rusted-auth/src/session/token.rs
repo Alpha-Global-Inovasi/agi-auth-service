@@ -24,8 +24,8 @@ const ENCODED_LEN: usize = 43;
 /// without padding.
 ///
 /// The token is the client's only credential for the session. It is handed out once, by
-/// [`SessionManager::create`](super::SessionManager::create) or
-/// [`LocalAuth::login`](super::LocalAuth::login), and cannot be recovered afterwards:
+/// [`SessionManager::create`](super::SessionManager::create) or by a login such as
+/// `local::LocalAuth::login`, and cannot be recovered afterwards:
 /// only its SHA-256 hash is stored.
 ///
 /// The `Debug` output never contains the token, there is no `Display`, and the memory is

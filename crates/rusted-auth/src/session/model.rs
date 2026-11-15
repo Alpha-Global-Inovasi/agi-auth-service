@@ -158,7 +158,7 @@ pub struct SessionRecord {
 /// events.
 ///
 /// ```rust
-/// use rusted_auth::local::SessionContext;
+/// use rusted_auth::session::SessionContext;
 ///
 /// let context = SessionContext::web()
 ///     .ip("203.0.113.7".parse().unwrap())

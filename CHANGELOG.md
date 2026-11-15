@@ -11,11 +11,10 @@ may contain breaking changes.
 
 - `local` cargo feature (off by default) with the `rusted_auth::local` module: accounts
   with a username, an email address and a password, independent of any web framework or
-  database.
+  database. It turns on the `session` feature below.
   - `LocalAuth::register` and `LocalAuth::login`. Login accepts a username or an email
     address, and a successful login creates a new session and returns its token
     (`Login`).
-  - `UserStore` trait for persistence, and `MemoryUserStore` for tests.
   - `PasswordHasher`: argon2id with the OWASP parameters (m = 19 MiB, t = 2, p = 1).
     At most 8 hashes run at once on dedicated threads, and a request that waits more
     than 2 seconds fails with `LocalError::Busy`; both limits are set with `HashLimits`.
@@ -35,7 +34,15 @@ may contain breaking changes.
   - Login requires a verified email address (`LocalError::EmailNotVerified`).
     `LocalAuthBuilder::require_verified_email(false)` turns this off for development.
   - `LocalError` with `public_message()` and `kind()`.
-  - Sessions, through `SessionManager` (`LocalAuth::sessions`):
+  - A password hash made with other parameters than the current ones is replaced at the
+    next successful login (`PasswordHasher::needs_rehash`,
+    `UserStore::replace_password_hash`). A failed replacement does not fail the login.
+- `session` cargo feature (off by default) with the `rusted_auth::session` module: the
+  parts every way of signing in shares, without any password code (it does not pull in
+  argon2).
+  - `User` and the `UserStore` trait for persistence, with `MemoryUserStore` for tests,
+    and `StoreError`.
+  - Sessions, through `SessionManager` (also reachable as `LocalAuth::sessions`):
     - Opaque tokens of 256 random bits, formatted `rusted_s_` plus 43 base64url
       characters (secret-scanner pattern `rusted_s_[A-Za-z0-9_-]{43}`). Only the SHA-256
       hash is stored; the token is returned once and never logged or shown by `Debug`.
@@ -53,9 +60,6 @@ may contain breaking changes.
     - `list` returns an account's usable sessions without tokens or hashes.
     - The `PendingMfa` state with `validate_pending_mfa` and `activate`, as groundwork
       for multi-factor authentication. Login does not create such sessions yet.
-  - A password hash made with other parameters than the current ones is replaced at the
-    next successful login (`PasswordHasher::needs_rehash`,
-    `UserStore::replace_password_hash`). A failed replacement does not fail the login.
   - `EventSink`, a hook for an audit log and metrics: successful and failed logins,
     lockouts, sessions created, activated and revoked, replaced password hashes, and
     how long hashing requests wait in the queue. There is no built-in implementation

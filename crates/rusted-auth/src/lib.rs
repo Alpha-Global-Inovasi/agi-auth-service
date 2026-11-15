@@ -53,6 +53,8 @@ mod jwks;
 #[cfg(feature = "local")]
 pub mod local;
 mod principal;
+#[cfg(feature = "session")]
+pub mod session;
 mod verifier;
 
 #[cfg(test)]

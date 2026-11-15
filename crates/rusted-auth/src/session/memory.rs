@@ -1,4 +1,4 @@
-use super::session::{NewSession, Session, SessionRecord, SessionState, SessionStore};
+use super::model::{NewSession, Session, SessionRecord, SessionState, SessionStore};
 use super::token::SessionTokenHash;
 use super::user::{NewUser, StoreError, User, UserRecord, UserStore};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};

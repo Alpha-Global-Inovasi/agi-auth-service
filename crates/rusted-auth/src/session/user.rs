@@ -1,11 +1,11 @@
-use super::error::{BoxError, LocalError};
+use super::error::BoxError;
 use std::fmt;
 use std::future::Future;
 use std::time::SystemTime;
 use thiserror::Error;
 use uuid::Uuid;
 
-/// A local account, without its credentials.
+/// An account, without its credentials.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
     /// Stable identifier.
@@ -104,17 +104,7 @@ impl StoreError {
     }
 }
 
-impl From<StoreError> for LocalError {
-    fn from(error: StoreError) -> Self {
-        match error {
-            StoreError::UsernameTaken => Self::UsernameTaken,
-            StoreError::EmailTaken => Self::EmailTaken,
-            other => Self::Store(Box::new(other)),
-        }
-    }
-}
-
-/// Persistence for local accounts.
+/// Persistence for accounts.
 ///
 /// Implement this for your database. [`MemoryUserStore`](super::MemoryUserStore) is an
 /// in-memory implementation for tests.
@@ -207,16 +197,5 @@ mod tests {
             locked_until: None,
         };
         assert!(!format!("{record:?}").contains("secret-hash"));
-    }
-
-    #[test]
-    fn conflicts_keep_their_meaning_and_backend_errors_stay_private() {
-        assert!(matches!(
-            LocalError::from(StoreError::UsernameTaken),
-            LocalError::UsernameTaken
-        ));
-        let error = LocalError::from(StoreError::backend("pool timed out"));
-        assert!(matches!(error, LocalError::Store(_)));
-        assert!(!error.public_message().contains("pool"));
     }
 }
