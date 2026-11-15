@@ -4,7 +4,7 @@ description = "Framework-agnostic authentication core for Rust services: multi-i
 readme = "README.md"
 keywords = ["auth", "jwt", "oidc", "jwks", "firebase"]
 categories = ["authentication", "web-programming"]
-include = ["src/*.rs", "README.md", "LICENSE-MIT", "LICENSE-APACHE"]
+include = ["src/*.rs", "src/local/*.rs", "README.md", "LICENSE-MIT", "LICENSE-APACHE"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,8 +18,11 @@ default = ["rustls-tls"]
 # TLS backend for fetching discovery and JWKS documents. Enable exactly one.
 rustls-tls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
+# Local accounts: password hashing (argon2id), registration and login.
+local = ["dep:argon2", "dep:uuid", "dep:zeroize"]
 
 [dependencies]
+argon2 = { workspace = true, optional = true }
 base64 = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
@@ -28,6 +31,11 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
+
+[package.metadata.docs.rs]
+features = ["local"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "time"] }

@@ -5,6 +5,29 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor version
 may contain breaking changes.
 
+## [Unreleased]
+
+### Added
+
+- `local` cargo feature (off by default) with the `rusted_auth::local` module: accounts
+  with a username, an email address and a password, independent of any web framework or
+  database.
+  - `LocalAuth::register`, `LocalAuth::username_available` and `LocalAuth::login`.
+    Login accepts a username or an email address.
+  - `UserStore` trait for persistence, and `MemoryUserStore` for tests.
+  - `PasswordHasher`: argon2id with the OWASP parameters (m = 19 MiB, t = 2, p = 1).
+    At most 8 hashes run at once on dedicated threads, and a request that waits more
+    than 2 seconds fails with `LocalError::Busy`; both limits are set with `HashLimits`.
+    It does not depend on a particular async runtime.
+  - Passwords are 8 to 128 characters with no composition rules (`validate_password`).
+  - Registration answers the same way whether or not the email address already has an
+    account (`RegistrationOutcome`). `LocalAuthBuilder::reveal_existing_email` opts out.
+  - A login for an unknown account costs the same hashing work as one for a known
+    account, and every rejected login has the same public message.
+  - Accounts lock after 5 consecutive failed logins, for 1 minute doubling up to
+    15 minutes (`LockoutPolicy`).
+  - `LocalError` with `public_message()` and `kind()`.
+
 ## [0.4.1] - 2026-11-15
 
 ### Changed

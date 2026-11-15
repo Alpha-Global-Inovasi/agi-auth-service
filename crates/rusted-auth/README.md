@@ -65,6 +65,7 @@ For Actix-web, use [`rusted-auth-actix`](https://crates.io/crates/rusted-auth-ac
 |---|---|---|
 | `rustls-tls` | yes | Fetch keys over TLS using rustls, verifying certificates against the operating system's trust store |
 | `native-tls` | no | Use the platform TLS library instead |
+| `local` | no | Local accounts: registration and login with argon2id password hashing (`rusted_auth::local`). Unreleased; see the module documentation |
 
 The library never reads environment variables and keeps no global state. It needs a Tokio runtime.
 
