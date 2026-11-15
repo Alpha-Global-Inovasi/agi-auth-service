@@ -1,5 +1,5 @@
 use super::error::LocalError;
-use super::password::{HashLimits, PasswordHasher, validate_password};
+use super::password::{HashLimits, PasswordHasher, PasswordPolicy};
 use super::user::{NewUser, StoreError, User, UserRecord, UserStore};
 use super::validate;
 use std::fmt;
@@ -75,7 +75,7 @@ pub struct Registration {
     pub username: String,
     /// Email address.
     pub email: String,
-    /// Display name. May be empty.
+    /// Display name. Required.
     pub name: String,
     /// Plain-text password.
     pub password: String,
@@ -128,17 +128,25 @@ type Clock = Box<dyn Fn() -> SystemTime + Send + Sync>;
 ///
 /// ```rust
 /// use rusted_auth::local::{LocalAuth, MemoryUserStore, Registration};
+/// use std::time::SystemTime;
 ///
 /// # async fn run() -> Result<(), rusted_auth::local::LocalError> {
 /// let auth = LocalAuth::builder(MemoryUserStore::new()).build()?;
 ///
-/// auth.register(Registration {
-///     username: "budi".into(),
-///     email: "budi@example.com".into(),
-///     name: "Budi Santoso".into(),
-///     password: "correct horse battery staple".into(),
-/// })
-/// .await?;
+/// let outcome = auth
+///     .register(Registration {
+///         username: "budi".into(),
+///         email: "budi@example.com".into(),
+///         name: "Budi Santoso".into(),
+///         password: "correct horse battery staple".into(),
+///     })
+///     .await?;
+///
+/// // Logging in requires a verified email address. The verification flow normally
+/// // records this; here the test store is edited directly.
+/// let id = outcome.created().expect("a new account").id;
+/// auth.store()
+///     .update(id, |account| account.user.email_verified_at = Some(SystemTime::now()));
 ///
 /// let user = auth.login("budi@example.com", "correct horse battery staple").await?;
 /// assert_eq!(user.username, "budi");
@@ -153,7 +161,9 @@ struct Inner<S> {
     store: S,
     hasher: PasswordHasher,
     lockout: LockoutPolicy,
+    password_policy: PasswordPolicy,
     reveal_existing_email: bool,
+    require_verified_email: bool,
     clock: Clock,
 }
 
@@ -170,7 +180,9 @@ impl<S> fmt::Debug for LocalAuth<S> {
         f.debug_struct("LocalAuth")
             .field("hasher", &self.inner.hasher)
             .field("lockout", &self.inner.lockout)
+            .field("password_policy", &self.inner.password_policy)
             .field("reveal_existing_email", &self.inner.reveal_existing_email)
+            .field("require_verified_email", &self.inner.require_verified_email)
             .finish_non_exhaustive()
     }
 }
@@ -181,7 +193,9 @@ pub struct LocalAuthBuilder<S> {
     hasher: Option<PasswordHasher>,
     hash_limits: HashLimits,
     lockout: LockoutPolicy,
+    password_policy: PasswordPolicy,
     reveal_existing_email: bool,
+    require_verified_email: bool,
     clock: Clock,
 }
 
@@ -205,9 +219,27 @@ impl<S: UserStore> LocalAuthBuilder<S> {
         self
     }
 
+    /// Length rule for new passwords. Default: 8 to 128 characters.
+    pub fn password_policy(mut self, policy: PasswordPolicy) -> Self {
+        self.password_policy = policy;
+        self
+    }
+
+    /// Whether [`LocalAuth::login`] refuses accounts whose email address has not been
+    /// verified. Default: `true`.
+    ///
+    /// Turn this off only in development, where no verification email can be delivered.
+    /// With it off, anyone can register with an address they do not own and use the
+    /// account.
+    pub fn require_verified_email(mut self, require: bool) -> Self {
+        self.require_verified_email = require;
+        self
+    }
+
     /// When `true`, registering an email address that already has an account fails with
     /// [`LocalError::EmailTaken`] instead of returning
-    /// [`RegistrationOutcome::EmailAlreadyRegistered`].
+    /// [`RegistrationOutcome::EmailAlreadyRegistered`], and
+    /// [`LocalAuth::username_available`] is switched on.
     ///
     /// This is friendlier, and it lets anyone test whether an address has an account.
     /// Default: `false`.
@@ -236,7 +268,9 @@ impl<S: UserStore> LocalAuthBuilder<S> {
                 store: self.store,
                 hasher,
                 lockout: self.lockout,
+                password_policy: self.password_policy,
                 reveal_existing_email: self.reveal_existing_email,
+                require_verified_email: self.require_verified_email,
                 clock: self.clock,
             }),
         })
@@ -251,7 +285,9 @@ impl<S: UserStore> LocalAuth<S> {
             hasher: None,
             hash_limits: HashLimits::default(),
             lockout: LockoutPolicy::default(),
+            password_policy: PasswordPolicy::default(),
             reveal_existing_email: false,
+            require_verified_email: true,
             clock: Box::new(SystemTime::now),
         }
     }
@@ -268,19 +304,29 @@ impl<S: UserStore> LocalAuth<S> {
 
     /// Whether `username` is well formed and not used by any account.
     ///
+    /// Only available with
+    /// [`reveal_existing_email(true)`](LocalAuthBuilder::reveal_existing_email);
+    /// otherwise it fails with [`LocalError::UsernameCheckDisabled`]. When registration
+    /// hides whether an email address has an account, this check would give it away: a
+    /// registration that silently created nothing leaves its username available.
+    ///
     /// This reveals which usernames exist, so callers must rate limit it. There is
     /// deliberately no equivalent for email addresses.
     ///
     /// Returns [`LocalError::InvalidUsername`] for a malformed username.
     pub async fn username_available(&self, username: &str) -> Result<bool, LocalError> {
+        if !self.inner.reveal_existing_email {
+            return Err(LocalError::UsernameCheckDisabled);
+        }
         let username = validate::username(username)?;
         Ok(self.inner.store.find_by_username(username).await?.is_none())
     }
 
     /// Create an account.
     ///
-    /// The username, email address and name are trimmed; the password is used as given.
-    /// The new account's email address is unverified.
+    /// The username, email address and name are trimmed; the password is not. The new
+    /// account's email address is unverified, so it cannot log in until the application
+    /// has verified it (see [`LocalAuthBuilder::require_verified_email`]).
     ///
     /// # Email addresses that are already registered
     ///
@@ -303,7 +349,7 @@ impl<S: UserStore> LocalAuth<S> {
         let username = validate::username(&input.username)?;
         let email = validate::email(&input.email)?;
         let name = validate::name(&input.name)?;
-        validate_password(&input.password)?;
+        inner.password_policy.validate(&input.password)?;
 
         if inner.store.find_by_username(username).await?.is_some() {
             return Err(LocalError::UsernameTaken);
@@ -350,7 +396,9 @@ impl<S: UserStore> LocalAuth<S> {
     /// [`LocalError::InvalidCredentials`], [`LocalError::AccountLocked`] and
     /// [`LocalError::AccountDisabled`] all carry the same
     /// [`public_message`](LocalError::public_message); the variants differ for logging
-    /// and metrics only. Also [`LocalError::Busy`] and storage failures.
+    /// and metrics only. [`LocalError::EmailNotVerified`] is returned when the password
+    /// is right but the email address is unverified. Also [`LocalError::Busy`] and
+    /// storage failures.
     pub async fn login(&self, identifier: &str, password: &str) -> Result<User, LocalError> {
         let inner = &self.inner;
         let record = self.find(identifier.trim()).await?;
@@ -393,6 +441,11 @@ impl<S: UserStore> LocalAuth<S> {
                 tracing::debug!(user_id = %user.id, failures, "login rejected: wrong password");
             }
             return Err(LocalError::InvalidCredentials);
+        }
+
+        if inner.require_verified_email && user.email_verified_at.is_none() {
+            tracing::debug!(user_id = %user.id, "login rejected: email address is not verified");
+            return Err(LocalError::EmailNotVerified);
         }
 
         inner.store.record_successful_login(user.id).await?;
@@ -445,7 +498,7 @@ mod tests {
         let clock = TestClock::new();
         let for_auth = clock.clone();
         let builder = LocalAuth::builder(MemoryUserStore::new())
-            .hasher(PasswordHasher::insecure_for_tests(HashLimits::default()))
+            .hasher(PasswordHasher::insecure_for_tests(HashLimits::default()).unwrap())
             .clock(move || for_auth.now());
         (builder, clock)
     }
@@ -469,7 +522,16 @@ mod tests {
             .register(registration("budi", "budi@example.com"))
             .await
             .unwrap();
-        outcome.created().unwrap().clone()
+        let user = outcome.created().unwrap().clone();
+        verify_email(auth, &user)
+    }
+
+    /// Mark the account's email address as verified, as the verification flow would.
+    fn verify_email(auth: &LocalAuth<MemoryUserStore>, user: &User) -> User {
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        auth.store()
+            .update(user.id, |r| r.user.email_verified_at = Some(at));
+        auth.store().get(user.id).unwrap().user
     }
 
     async fn fail_login(auth: &LocalAuth<MemoryUserStore>, times: u32) {
@@ -526,6 +588,7 @@ mod tests {
         assert!(hash.starts_with("$argon2id$"));
         assert!(!hash.contains(PASSWORD));
 
+        let user = verify_email(&auth, &user);
         assert_eq!(auth.login("budi", PASSWORD).await.unwrap(), user);
         assert_eq!(auth.login("BUDI", PASSWORD).await.unwrap(), user);
         assert_eq!(
@@ -560,13 +623,13 @@ mod tests {
         input.password = "1234567".into();
         assert!(matches!(
             auth.register(input.clone()).await,
-            Err(LocalError::PasswordTooShort)
+            Err(LocalError::PasswordTooShort { min: 8 })
         ));
 
         input.password = "a".repeat(129);
         assert!(matches!(
             auth.register(input.clone()).await,
-            Err(LocalError::PasswordTooLong)
+            Err(LocalError::PasswordTooLong { max: 128 })
         ));
         assert!(auth.store().is_empty());
 
@@ -596,7 +659,13 @@ mod tests {
 
         // Nothing was created or changed, and the original password still works.
         assert_eq!(auth.store().len(), 1);
-        assert!(auth.username_available("someone-else").await.unwrap());
+        assert!(
+            auth.store()
+                .find_by_username("someone-else")
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(auth.login("budi", PASSWORD).await.unwrap(), budi);
     }
 
@@ -634,7 +703,8 @@ mod tests {
 
     #[tokio::test]
     async fn username_availability() {
-        let (auth, _) = auth();
+        let (builder, _) = builder();
+        let auth = builder.reveal_existing_email(true).build().unwrap();
         assert!(auth.username_available("budi").await.unwrap());
         register_budi(&auth).await;
         assert!(!auth.username_available("budi").await.unwrap());
@@ -644,6 +714,90 @@ mod tests {
             auth.username_available("no spaces allowed").await,
             Err(LocalError::InvalidUsername)
         ));
+    }
+
+    #[tokio::test]
+    async fn username_check_is_off_while_registration_hides_existing_emails() {
+        let (auth, _) = auth();
+        register_budi(&auth).await;
+        for username in ["budi", "siti", "not a username"] {
+            let error = auth.username_available(username).await.unwrap_err();
+            assert!(matches!(error, LocalError::UsernameCheckDisabled));
+            assert_eq!(error.public_message(), "Not available");
+        }
+    }
+
+    #[tokio::test]
+    async fn name_is_required() {
+        let (auth, _) = auth();
+        for name in ["", "   "] {
+            let mut input = registration("budi", "budi@example.com");
+            input.name = name.into();
+            assert!(matches!(
+                auth.register(input).await,
+                Err(LocalError::InvalidName)
+            ));
+        }
+        assert!(auth.store().is_empty());
+    }
+
+    #[tokio::test]
+    async fn minimum_password_length_is_configurable() {
+        let (builder, _) = builder();
+        let auth = builder
+            .password_policy(PasswordPolicy::default().min_chars(12))
+            .build()
+            .unwrap();
+
+        let mut input = registration("budi", "budi@example.com");
+        input.password = "11 chars...".into();
+        assert!(matches!(
+            auth.register(input.clone()).await,
+            Err(LocalError::PasswordTooShort { min: 12 })
+        ));
+        input.password = "12 chars....".into();
+        assert!(auth.register(input).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn unverified_email_cannot_log_in() {
+        let (auth, _) = auth();
+        let user = auth
+            .register(registration("budi", "budi@example.com"))
+            .await
+            .unwrap()
+            .created()
+            .unwrap()
+            .clone();
+
+        let error = auth.login("budi", PASSWORD).await.unwrap_err();
+        assert!(matches!(error, LocalError::EmailNotVerified));
+        assert_eq!(error.public_message(), "Email address is not verified");
+        assert_eq!(auth.store().get(user.id).unwrap().failed_login_count, 0);
+
+        // Without the password the account looks like any other.
+        let error = auth.login("budi", "wrong password").await.unwrap_err();
+        assert!(matches!(error, LocalError::InvalidCredentials));
+        assert_eq!(auth.store().get(user.id).unwrap().failed_login_count, 1);
+
+        let user = verify_email(&auth, &user);
+        assert_eq!(auth.login("budi", PASSWORD).await.unwrap(), user);
+    }
+
+    #[tokio::test]
+    async fn unverified_email_can_log_in_when_the_requirement_is_off() {
+        let (builder, _) = builder();
+        let auth = builder.require_verified_email(false).build().unwrap();
+        let user = auth
+            .register(registration("budi", "budi@example.com"))
+            .await
+            .unwrap()
+            .created()
+            .unwrap()
+            .clone();
+
+        assert_eq!(user.email_verified_at, None);
+        assert_eq!(auth.login("budi", PASSWORD).await.unwrap(), user);
     }
 
     #[tokio::test]
@@ -816,7 +970,7 @@ mod tests {
     #[tokio::test]
     async fn busy_hasher_is_reported_as_busy() {
         let limits = HashLimits::default().max_concurrent(1).max_queued(1);
-        let hasher = PasswordHasher::insecure_for_tests(limits);
+        let hasher = PasswordHasher::insecure_for_tests(limits).unwrap();
         let auth = LocalAuth::builder(MemoryUserStore::new())
             .hasher(hasher.clone())
             .build()

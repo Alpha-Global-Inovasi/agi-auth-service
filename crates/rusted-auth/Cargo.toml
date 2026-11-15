@@ -19,7 +19,10 @@ default = ["rustls-tls"]
 rustls-tls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
 # Local accounts: password hashing (argon2id), registration and login.
-local = ["dep:argon2", "dep:uuid", "dep:zeroize"]
+local = ["dep:argon2", "dep:unicode-normalization", "dep:uuid", "dep:zeroize"]
+# Test helpers for `local`, such as a password hasher with cheap parameters.
+# Never enable this in a production build.
+test-util = ["local"]
 
 [dependencies]
 argon2 = { workspace = true, optional = true }
@@ -31,6 +34,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+unicode-normalization = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 zeroize = { workspace = true, optional = true }
 

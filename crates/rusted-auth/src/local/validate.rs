@@ -57,11 +57,13 @@ pub(crate) fn email(input: &str) -> Result<&str, LocalError> {
     }
 }
 
-/// Trim and check a display name: at most 255 characters, no control characters. An empty
-/// name is allowed.
+/// Trim and check a display name: 1 to 255 characters, no control characters.
 pub(crate) fn name(input: &str) -> Result<&str, LocalError> {
     let name = input.trim();
-    if name.chars().count() <= MAX_NAME_CHARS && !name.chars().any(char::is_control) {
+    let valid = !name.is_empty()
+        && name.chars().count() <= MAX_NAME_CHARS
+        && !name.chars().any(char::is_control);
+    if valid {
         Ok(name)
     } else {
         Err(LocalError::InvalidName)
@@ -137,7 +139,8 @@ mod tests {
     #[test]
     fn names() {
         assert_eq!(name("  Budi Santoso ").unwrap(), "Budi Santoso");
-        assert_eq!(name("").unwrap(), "");
+        assert!(matches!(name(""), Err(LocalError::InvalidName)));
+        assert!(matches!(name("   "), Err(LocalError::InvalidName)));
         assert!(name(&"é".repeat(255)).is_ok());
         assert!(matches!(
             name(&"a".repeat(256)),

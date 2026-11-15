@@ -16,7 +16,7 @@ pub struct User {
     pub email: String,
     /// When the email address was confirmed, if it has been.
     pub email_verified_at: Option<SystemTime>,
-    /// Display name. May be empty.
+    /// Display name.
     pub name: String,
     /// When the account was disabled, if it has been. Disabled accounts cannot log in.
     pub disabled_at: Option<SystemTime>,
@@ -59,7 +59,7 @@ pub struct NewUser {
     pub username: String,
     /// Validated email address, with the capitalization the user typed.
     pub email: String,
-    /// Display name. May be empty.
+    /// Display name.
     pub name: String,
     /// Password hash in PHC string format.
     pub password_hash: Option<String>,

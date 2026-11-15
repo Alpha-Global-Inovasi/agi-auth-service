@@ -10,9 +10,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
+use unicode_normalization::UnicodeNormalization as _;
 use zeroize::Zeroizing;
 
-/// Minimum password length, in Unicode scalar values.
+/// Shortest minimum password length a [`PasswordPolicy`] can have, in Unicode scalar
+/// values. Also the default.
 pub const MIN_PASSWORD_CHARS: usize = 8;
 
 /// Maximum password length, in Unicode scalar values.
@@ -25,22 +27,68 @@ const ITERATIONS: u32 = 2;
 /// argon2id degree of parallelism.
 const PARALLELISM: u32 = 1;
 
-/// Check a new password against the length policy.
+/// Length rule for new passwords.
 ///
-/// The only rule is a length of [`MIN_PASSWORD_CHARS`] to [`MAX_PASSWORD_CHARS`]
-/// characters. There are no composition rules (NIST SP 800-63B). Characters are counted
-/// as Unicode scalar values, and the password is used exactly as given: it is neither
-/// trimmed nor normalized.
+/// The only rule is a length between a minimum and [`MAX_PASSWORD_CHARS`] characters.
+/// There are no composition rules (NIST SP 800-63B). Characters are counted as Unicode
+/// scalar values in the password as typed, which is not trimmed.
+///
+/// The minimum defaults to [`MIN_PASSWORD_CHARS`] and can be raised, not lowered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PasswordPolicy {
+    min_chars: usize,
+}
+
+impl Default for PasswordPolicy {
+    fn default() -> Self {
+        Self {
+            min_chars: MIN_PASSWORD_CHARS,
+        }
+    }
+}
+
+impl PasswordPolicy {
+    /// Set the minimum length. Values outside [`MIN_PASSWORD_CHARS`] to
+    /// [`MAX_PASSWORD_CHARS`] are moved to the nearest bound.
+    pub fn min_chars(mut self, chars: usize) -> Self {
+        self.min_chars = chars.clamp(MIN_PASSWORD_CHARS, MAX_PASSWORD_CHARS);
+        self
+    }
+
+    /// The minimum length in characters.
+    pub fn minimum_chars(&self) -> usize {
+        self.min_chars
+    }
+
+    /// Check a new password against this policy.
+    pub fn validate(&self, password: &str) -> Result<(), LocalError> {
+        let too_long = LocalError::PasswordTooLong {
+            max: MAX_PASSWORD_CHARS,
+        };
+        // Bytes bound the character count from above, which avoids walking a huge input.
+        if password.len() > MAX_PASSWORD_CHARS * 4 {
+            return Err(too_long);
+        }
+        match password.chars().count() {
+            n if n < self.min_chars => Err(LocalError::PasswordTooShort {
+                min: self.min_chars,
+            }),
+            n if n > MAX_PASSWORD_CHARS => Err(too_long),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Check a new password against the default [`PasswordPolicy`]:
+/// [`MIN_PASSWORD_CHARS`] to [`MAX_PASSWORD_CHARS`] characters.
 pub fn validate_password(password: &str) -> Result<(), LocalError> {
-    // Bytes bound the character count from above, which avoids walking a huge input.
-    if password.len() > MAX_PASSWORD_CHARS * 4 {
-        return Err(LocalError::PasswordTooLong);
-    }
-    match password.chars().count() {
-        n if n < MIN_PASSWORD_CHARS => Err(LocalError::PasswordTooShort),
-        n if n > MAX_PASSWORD_CHARS => Err(LocalError::PasswordTooLong),
-        _ => Ok(()),
-    }
+    PasswordPolicy::default().validate(password)
+}
+
+/// The form of a password that is hashed: Unicode NFKC, so the same password typed on
+/// keyboards that compose characters differently gives the same hash.
+fn normalize(password: &str) -> Zeroizing<String> {
+    Zeroizing::new(password.nfkc().collect())
 }
 
 /// Limits on concurrent password hashing.
@@ -97,6 +145,8 @@ impl HashLimits {
 /// which are started on demand and exit when idle. The methods are `async` but do not
 /// depend on a particular async runtime.
 ///
+/// Passwords are normalized to Unicode NFKC before hashing and verifying.
+///
 /// Clones share the same limits and threads. Create one per application.
 #[derive(Clone)]
 pub struct PasswordHasher {
@@ -148,11 +198,15 @@ impl PasswordHasher {
         Self::with_params(params, limits)
     }
 
-    /// A hasher with cheap parameters so tests do not spend seconds hashing.
-    #[cfg(test)]
-    pub(crate) fn insecure_for_tests(limits: HashLimits) -> Self {
-        let params = Params::new(Params::MIN_M_COST, 1, 1, None).unwrap();
-        Self::with_params(params, limits).unwrap()
+    /// A hasher with the weakest argon2 parameters, so tests do not spend their time
+    /// hashing. Hashes it produces offer no real protection.
+    ///
+    /// Available with the `test-util` cargo feature. **Never use it outside tests.**
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn insecure_for_tests(limits: HashLimits) -> Result<Self, LocalError> {
+        let params = Params::new(Params::MIN_M_COST, 1, 1, None)
+            .map_err(|e| LocalError::Internal(format!("argon2 parameters: {e}")))?;
+        Self::with_params(params, limits)
     }
 
     /// Occupies one worker until the returned sender is used or dropped. Returns once
@@ -208,10 +262,11 @@ impl PasswordHasher {
     /// Hash a new password and return it as a PHC string (`$argon2id$v=19$...`) with a
     /// fresh random salt.
     ///
-    /// The password must satisfy [`validate_password`].
+    /// The password must satisfy the default [`PasswordPolicy`]; a stricter policy is
+    /// the caller's to apply first, as [`LocalAuth`](super::LocalAuth) does.
     pub async fn hash(&self, password: &str) -> Result<String, LocalError> {
         validate_password(password)?;
-        let password = Zeroizing::new(password.to_owned());
+        let password = normalize(password);
         let params = self.inner.params.clone();
         self.run(move || hash_blocking(&params, &password)).await
     }
@@ -226,11 +281,11 @@ impl PasswordHasher {
         // without spending a hash on attacker-sized input.
         if matches!(
             validate_password(password),
-            Err(LocalError::PasswordTooLong)
+            Err(LocalError::PasswordTooLong { .. })
         ) {
             return Ok(false);
         }
-        let password = Zeroizing::new(password.to_owned());
+        let password = normalize(password);
         let hash = hash.to_owned();
         self.run(move || verify_blocking(&password, &hash)).await
     }
@@ -369,20 +424,20 @@ mod tests {
     use std::sync::mpsc;
 
     fn hasher(limits: HashLimits) -> PasswordHasher {
-        PasswordHasher::insecure_for_tests(limits)
+        PasswordHasher::insecure_for_tests(limits).unwrap()
     }
 
     #[test]
     fn password_length_is_counted_in_characters() {
         assert!(matches!(
             validate_password("1234567"),
-            Err(LocalError::PasswordTooShort)
+            Err(LocalError::PasswordTooShort { .. })
         ));
         assert!(validate_password("12345678").is_ok());
         assert!(validate_password(&"a".repeat(128)).is_ok());
         assert!(matches!(
             validate_password(&"a".repeat(129)),
-            Err(LocalError::PasswordTooLong)
+            Err(LocalError::PasswordTooLong { .. })
         ));
 
         // Multi-byte characters count once each.
@@ -390,11 +445,11 @@ mod tests {
         assert!(validate_password(&"🔑".repeat(128)).is_ok());
         assert!(matches!(
             validate_password(&"🔑".repeat(129)),
-            Err(LocalError::PasswordTooLong)
+            Err(LocalError::PasswordTooLong { .. })
         ));
         assert!(matches!(
             validate_password(&"a".repeat(1_000_000)),
-            Err(LocalError::PasswordTooLong)
+            Err(LocalError::PasswordTooLong { .. })
         ));
     }
 
@@ -403,6 +458,46 @@ mod tests {
         assert!(validate_password("aaaaaaaa").is_ok());
         assert!(validate_password("        ").is_ok());
         assert!(validate_password("correct horse battery staple").is_ok());
+    }
+
+    #[test]
+    fn minimum_length_can_be_raised_but_not_lowered() {
+        let policy = PasswordPolicy::default().min_chars(12);
+        assert_eq!(policy.minimum_chars(), 12);
+        assert!(matches!(
+            policy.validate("11 chars..."),
+            Err(LocalError::PasswordTooShort { min: 12 })
+        ));
+        assert!(policy.validate("12 chars....").is_ok());
+        assert!(matches!(
+            policy.validate(&"a".repeat(129)),
+            Err(LocalError::PasswordTooLong { max: 128 })
+        ));
+
+        assert_eq!(PasswordPolicy::default().minimum_chars(), 8);
+        assert_eq!(PasswordPolicy::default().min_chars(1).minimum_chars(), 8);
+        assert_eq!(
+            PasswordPolicy::default().min_chars(500).minimum_chars(),
+            128
+        );
+    }
+
+    #[tokio::test]
+    async fn equivalent_unicode_forms_are_the_same_password() {
+        let hasher = hasher(HashLimits::default());
+        // "e with acute" precomposed, and "e" followed by a combining acute accent.
+        let composed = "caf\u{e9} au lait";
+        let decomposed = "cafe\u{301} au lait";
+        assert_ne!(composed, decomposed);
+
+        let hash = hasher.hash(composed).await.unwrap();
+        assert!(hasher.verify(decomposed, &hash).await.unwrap());
+        assert!(hasher.verify(composed, &hash).await.unwrap());
+
+        // Compatibility forms too, such as the "fi" ligature.
+        let hash = hasher.hash("\u{fb01}ne password").await.unwrap();
+        assert!(hasher.verify("fine password", &hash).await.unwrap());
+        assert!(!hasher.verify("fine passw0rd", &hash).await.unwrap());
     }
 
     #[tokio::test]
@@ -437,11 +532,11 @@ mod tests {
         let hasher = hasher(HashLimits::default());
         assert!(matches!(
             hasher.hash("short").await,
-            Err(LocalError::PasswordTooShort)
+            Err(LocalError::PasswordTooShort { .. })
         ));
         assert!(matches!(
             hasher.hash(&"a".repeat(129)).await,
-            Err(LocalError::PasswordTooLong)
+            Err(LocalError::PasswordTooLong { .. })
         ));
     }
 

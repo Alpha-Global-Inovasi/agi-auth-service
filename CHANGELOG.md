@@ -12,21 +12,31 @@ may contain breaking changes.
 - `local` cargo feature (off by default) with the `rusted_auth::local` module: accounts
   with a username, an email address and a password, independent of any web framework or
   database.
-  - `LocalAuth::register`, `LocalAuth::username_available` and `LocalAuth::login`.
-    Login accepts a username or an email address.
+  - `LocalAuth::register` and `LocalAuth::login`. Login accepts a username or an email
+    address.
   - `UserStore` trait for persistence, and `MemoryUserStore` for tests.
   - `PasswordHasher`: argon2id with the OWASP parameters (m = 19 MiB, t = 2, p = 1).
     At most 8 hashes run at once on dedicated threads, and a request that waits more
     than 2 seconds fails with `LocalError::Busy`; both limits are set with `HashLimits`.
     It does not depend on a particular async runtime.
-  - Passwords are 8 to 128 characters with no composition rules (`validate_password`).
+  - Passwords are 8 to 128 characters with no composition rules, and are normalized to
+    Unicode NFKC before hashing. `PasswordPolicy` raises the minimum length.
   - Registration answers the same way whether or not the email address already has an
     account (`RegistrationOutcome`). `LocalAuthBuilder::reveal_existing_email` opts out.
+  - `LocalAuth::username_available`, which only works together with
+    `reveal_existing_email(true)`: while registration hides existing email addresses,
+    a public username check would reveal them.
   - A login for an unknown account costs the same hashing work as one for a known
-    account, and every rejected login has the same public message.
+    account, and a wrong password, an unknown account, a locked account and a disabled
+    account all have the same public message.
   - Accounts lock after 5 consecutive failed logins, for 1 minute doubling up to
     15 minutes (`LockoutPolicy`).
+  - Login requires a verified email address (`LocalError::EmailNotVerified`).
+    `LocalAuthBuilder::require_verified_email(false)` turns this off for development.
   - `LocalError` with `public_message()` and `kind()`.
+- `test-util` cargo feature: `PasswordHasher::insecure_for_tests`, a hasher with the
+  weakest argon2 parameters so that test suites stay fast. Never enable it in a
+  production build.
 
 ## [0.4.1] - 2026-11-15
 
