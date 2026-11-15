@@ -1,10 +1,15 @@
 use super::error::LocalError;
+use super::event::{AuthEvent, AuthEventKind, Events, LoginFailure};
+use super::manager::{Clock, SessionManager};
 use super::password::{HashLimits, PasswordHasher, PasswordPolicy};
+use super::session::{Session, SessionContext, SessionState, SessionStore};
+use super::token::SessionToken;
 use super::user::{NewUser, StoreError, User, UserRecord, UserStore};
 use super::validate;
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use uuid::Uuid;
 
 /// When and for how long an account is locked after failed logins.
 ///
@@ -119,19 +124,37 @@ impl RegistrationOutcome {
     }
 }
 
-type Clock = Box<dyn Fn() -> SystemTime + Send + Sync>;
+/// A successful [`LocalAuth::login`]: the account and its new session.
+///
+/// This is the only time the session token is available. The `Debug` output does not
+/// contain it.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Login {
+    /// The account that logged in.
+    pub user: User,
+    /// The session created for this login.
+    pub session: Session,
+    /// The session token to hand to the client.
+    pub token: SessionToken,
+}
 
 /// Local accounts: registration and login with a username or email address and a
 /// password.
 ///
-/// Cheap to clone; clones share the store and the password hasher.
+/// Cheap to clone; clones share the stores, the session manager and the password hasher.
 ///
 /// ```rust
-/// use rusted_auth::local::{LocalAuth, MemoryUserStore, Registration};
+/// use rusted_auth::local::{
+///     LocalAuth, MemorySessionStore, MemoryUserStore, Registration, SessionContext,
+///     SessionManager,
+/// };
 /// use std::time::SystemTime;
 ///
-/// # async fn run() -> Result<(), rusted_auth::local::LocalError> {
-/// let auth = LocalAuth::builder(MemoryUserStore::new()).build()?;
+/// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+/// let users = MemoryUserStore::new();
+/// let sessions = SessionManager::new(MemorySessionStore::new(users.clone()));
+/// let auth = LocalAuth::builder(users, sessions).build()?;
 ///
 /// let outcome = auth
 ///     .register(Registration {
@@ -148,17 +171,29 @@ type Clock = Box<dyn Fn() -> SystemTime + Send + Sync>;
 /// auth.store()
 ///     .update(id, |account| account.user.email_verified_at = Some(SystemTime::now()));
 ///
-/// let user = auth.login("budi@example.com", "correct horse battery staple").await?;
-/// assert_eq!(user.username, "budi");
+/// let login = auth
+///     .login(
+///         "budi@example.com",
+///         "correct horse battery staple",
+///         SessionContext::web(),
+///     )
+///     .await?;
+/// assert_eq!(login.user.username, "budi");
+///
+/// // The token goes to the client; later requests are checked with it.
+/// let authenticated = auth.sessions().validate(login.token.expose()).await?;
+/// assert_eq!(authenticated.user.id, id);
 /// # Ok(())
 /// # }
 /// ```
-pub struct LocalAuth<S> {
-    inner: Arc<Inner<S>>,
+pub struct LocalAuth<U, S> {
+    inner: Arc<Inner<U, S>>,
 }
 
-struct Inner<S> {
-    store: S,
+struct Inner<U, S> {
+    store: U,
+    sessions: SessionManager<S>,
+    events: Events,
     hasher: PasswordHasher,
     lockout: LockoutPolicy,
     password_policy: PasswordPolicy,
@@ -167,7 +202,7 @@ struct Inner<S> {
     clock: Clock,
 }
 
-impl<S> Clone for LocalAuth<S> {
+impl<U, S> Clone for LocalAuth<U, S> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -175,7 +210,7 @@ impl<S> Clone for LocalAuth<S> {
     }
 }
 
-impl<S> fmt::Debug for LocalAuth<S> {
+impl<U, S> fmt::Debug for LocalAuth<U, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LocalAuth")
             .field("hasher", &self.inner.hasher)
@@ -188,8 +223,9 @@ impl<S> fmt::Debug for LocalAuth<S> {
 }
 
 /// Configures a [`LocalAuth`]. Created by [`LocalAuth::builder`].
-pub struct LocalAuthBuilder<S> {
-    store: S,
+pub struct LocalAuthBuilder<U, S> {
+    store: U,
+    sessions: SessionManager<S>,
     hasher: Option<PasswordHasher>,
     hash_limits: HashLimits,
     lockout: LockoutPolicy,
@@ -199,7 +235,7 @@ pub struct LocalAuthBuilder<S> {
     clock: Clock,
 }
 
-impl<S: UserStore> LocalAuthBuilder<S> {
+impl<U: UserStore, S: SessionStore> LocalAuthBuilder<U, S> {
     /// Limits on concurrent password hashing. Ignored when a
     /// [`hasher`](Self::hasher) is supplied.
     pub fn hash_limits(mut self, limits: HashLimits) -> Self {
@@ -257,15 +293,19 @@ impl<S: UserStore> LocalAuthBuilder<S> {
     /// Build the service.
     ///
     /// Unless a [`hasher`](Self::hasher) was supplied this creates one, which computes a
-    /// password hash on the calling thread (see [`PasswordHasher::new`]).
-    pub fn build(self) -> Result<LocalAuth<S>, LocalError> {
+    /// password hash on the calling thread (see [`PasswordHasher::new`]) and reports its
+    /// queue waits to the session manager's event sink.
+    pub fn build(self) -> Result<LocalAuth<U, S>, LocalError> {
+        let events = self.sessions.events().clone();
         let hasher = match self.hasher {
             Some(hasher) => hasher,
-            None => PasswordHasher::with_limits(self.hash_limits)?,
+            None => PasswordHasher::production(self.hash_limits, events.clone())?,
         };
         Ok(LocalAuth {
             inner: Arc::new(Inner {
                 store: self.store,
+                sessions: self.sessions,
+                events,
                 hasher,
                 lockout: self.lockout,
                 password_policy: self.password_policy,
@@ -277,11 +317,16 @@ impl<S: UserStore> LocalAuthBuilder<S> {
     }
 }
 
-impl<S: UserStore> LocalAuth<S> {
-    /// Start configuring local accounts backed by `store`.
-    pub fn builder(store: S) -> LocalAuthBuilder<S> {
+impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
+    /// Start configuring local accounts backed by `store`, whose logins create sessions
+    /// through `sessions`.
+    ///
+    /// Login events are reported to the event sink of `sessions`
+    /// ([`SessionManagerBuilder::events`](super::SessionManagerBuilder::events)).
+    pub fn builder(store: U, sessions: SessionManager<S>) -> LocalAuthBuilder<U, S> {
         LocalAuthBuilder {
             store,
+            sessions,
             hasher: None,
             hash_limits: HashLimits::default(),
             lockout: LockoutPolicy::default(),
@@ -293,8 +338,14 @@ impl<S: UserStore> LocalAuth<S> {
     }
 
     /// The user store.
-    pub fn store(&self) -> &S {
+    pub fn store(&self) -> &U {
         &self.inner.store
+    }
+
+    /// The session manager: validates the tokens that [`login`](Self::login) hands out,
+    /// lists and revokes sessions.
+    pub fn sessions(&self) -> &SessionManager<S> {
+        &self.inner.sessions
     }
 
     /// The password hasher, for sharing its concurrency limit with other components.
@@ -380,16 +431,29 @@ impl<S: UserStore> LocalAuth<S> {
         }
     }
 
-    /// Check a username or email address and a password.
+    /// Check a username or email address and a password, and create a session.
     ///
     /// An identifier containing `@` is looked up as an email address, anything else as a
-    /// username. On success the failed login counter is reset and the account is
-    /// returned; issuing a session for it is up to the caller.
+    /// username. `context` says what kind of client is logging in and carries its address
+    /// and `User-Agent`, which are stored with the session and copied into audit events.
+    ///
+    /// On success the failed login counter is reset and the result holds the account and
+    /// a **new** session in state [`Active`](SessionState::Active) with its token. Every
+    /// login creates its own session and no existing session is reused, so a token that
+    /// was known before the login never becomes authenticated by it (session fixation).
+    /// Earlier sessions of the account stay valid.
     ///
     /// Every attempt performs exactly one password hash verification, including attempts
     /// for accounts that do not exist, have no password, are locked or are disabled, so
     /// response time does not tell these cases apart. Attempts against a locked account
     /// are rejected even with the right password and do not extend the lock.
+    ///
+    /// # Outdated password hashes
+    ///
+    /// When the stored hash was made with other parameters than the hasher uses now, a
+    /// successful login hashes the password again and replaces the stored hash. This
+    /// costs one extra hash, once per account. If it fails, for example because hashing
+    /// is at capacity, the login still succeeds and the next one tries again.
     ///
     /// # Errors
     ///
@@ -399,8 +463,14 @@ impl<S: UserStore> LocalAuth<S> {
     /// and metrics only. [`LocalError::EmailNotVerified`] is returned when the password
     /// is right but the email address is unverified. Also [`LocalError::Busy`] and
     /// storage failures.
-    pub async fn login(&self, identifier: &str, password: &str) -> Result<User, LocalError> {
+    pub async fn login(
+        &self,
+        identifier: &str,
+        password: &str,
+        context: SessionContext,
+    ) -> Result<Login, LocalError> {
         let inner = &self.inner;
+        let context = context.normalized();
         let record = self.find(identifier.trim()).await?;
 
         let Some((record, hash)) = record.and_then(|r| {
@@ -409,6 +479,8 @@ impl<S: UserStore> LocalAuth<S> {
         }) else {
             inner.hasher.verify_dummy(password).await?;
             tracing::debug!("login rejected: no such account or no password set");
+            let now = (inner.clock)();
+            self.login_failed(now, None, &context, LoginFailure::UnknownAccount);
             return Err(LocalError::InvalidCredentials);
         };
 
@@ -418,25 +490,32 @@ impl<S: UserStore> LocalAuth<S> {
 
         if user.disabled_at.is_some() {
             tracing::debug!(user_id = %user.id, "login rejected: account is disabled");
+            self.login_failed(now, Some(user.id), &context, LoginFailure::AccountDisabled);
             return Err(LocalError::AccountDisabled);
         }
         if let Some(until) = record.locked_until.filter(|until| *until > now) {
             tracing::debug!(user_id = %user.id, "login rejected: account is locked");
+            self.login_failed(now, Some(user.id), &context, LoginFailure::AccountLocked);
             return Err(LocalError::AccountLocked { until });
         }
         if !password_matches {
             let failures = inner.store.record_failed_login(user.id).await?;
+            self.login_failed(now, Some(user.id), &context, LoginFailure::WrongPassword);
             if let Some(duration) = inner.lockout.lock_duration(failures) {
-                inner
-                    .store
-                    .set_locked_until(user.id, Some(now + duration))
-                    .await?;
+                let until = now + duration;
+                inner.store.set_locked_until(user.id, Some(until)).await?;
                 tracing::warn!(
                     user_id = %user.id,
                     failures,
                     lock_secs = duration.as_secs(),
                     "account locked after repeated failed logins"
                 );
+                self.emit(now, Some(user.id), &context, || {
+                    AuthEventKind::AccountLocked {
+                        until,
+                        failed_logins: failures,
+                    }
+                });
             } else {
                 tracing::debug!(user_id = %user.id, failures, "login rejected: wrong password");
             }
@@ -445,12 +524,95 @@ impl<S: UserStore> LocalAuth<S> {
 
         if inner.require_verified_email && user.email_verified_at.is_none() {
             tracing::debug!(user_id = %user.id, "login rejected: email address is not verified");
+            self.login_failed(now, Some(user.id), &context, LoginFailure::EmailNotVerified);
             return Err(LocalError::EmailNotVerified);
         }
 
         inner.store.record_successful_login(user.id).await?;
-        tracing::debug!(user_id = %user.id, "login succeeded");
-        Ok(user)
+        self.rehash_if_outdated(now, user.id, password, &hash, &context)
+            .await;
+
+        let issued = inner
+            .sessions
+            .create(user.id, SessionState::Active, context.clone())
+            .await?;
+        tracing::debug!(user_id = %user.id, session_id = %issued.session.id, "login succeeded");
+        self.emit(now, Some(user.id), &context, || {
+            AuthEventKind::LoginSucceeded {
+                session_id: issued.session.id,
+            }
+        });
+        Ok(Login {
+            user,
+            session: issued.session,
+            token: issued.token,
+        })
+    }
+
+    /// Replace a password hash made with outdated parameters. Never fails the login.
+    async fn rehash_if_outdated(
+        &self,
+        now: SystemTime,
+        user_id: Uuid,
+        password: &str,
+        current_hash: &str,
+        context: &SessionContext,
+    ) {
+        let inner = &self.inner;
+        if !inner.hasher.needs_rehash(current_hash) {
+            return;
+        }
+        let replaced = async {
+            let new_hash = inner.hasher.hash(password).await?;
+            let replaced = inner
+                .store
+                .replace_password_hash(user_id, current_hash, new_hash)
+                .await?;
+            Ok::<_, LocalError>(replaced)
+        }
+        .await;
+        match replaced {
+            Ok(true) => {
+                tracing::debug!(%user_id, "password hash upgraded to the current parameters");
+                self.emit(now, Some(user_id), context, || {
+                    AuthEventKind::PasswordRehashed
+                });
+            }
+            Ok(false) => {
+                tracing::debug!(%user_id, "password changed during login; hash left as it is");
+            }
+            Err(error) => {
+                tracing::warn!(%user_id, %error, "could not upgrade password hash");
+            }
+        }
+    }
+
+    fn login_failed(
+        &self,
+        now: SystemTime,
+        user_id: Option<Uuid>,
+        context: &SessionContext,
+        reason: LoginFailure,
+    ) {
+        self.emit(now, user_id, context, || AuthEventKind::LoginFailed {
+            reason,
+        });
+    }
+
+    fn emit(
+        &self,
+        now: SystemTime,
+        user_id: Option<Uuid>,
+        context: &SessionContext,
+        kind: impl FnOnce() -> AuthEventKind,
+    ) {
+        self.inner.events.emit(|| AuthEvent {
+            at: now,
+            user_id,
+            ip: context.ip,
+            user_agent: context.user_agent.clone(),
+            kind: kind(),
+        });
     }
 
     async fn find(&self, identifier: &str) -> Result<Option<UserRecord>, LocalError> {
@@ -471,8 +633,12 @@ impl<S: UserStore> LocalAuth<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::MemoryUserStore;
+    use crate::local::event::testing::Recorder;
+    use crate::local::{MemorySessionStore, MemoryUserStore, SessionError, SessionKind};
     use std::sync::Mutex;
+
+    type TestAuth = LocalAuth<MemoryUserStore, MemorySessionStore>;
+    type TestBuilder = LocalAuthBuilder<MemoryUserStore, MemorySessionStore>;
 
     const PASSWORD: &str = "correct horse battery staple";
 
@@ -494,16 +660,43 @@ mod tests {
         }
     }
 
-    fn builder() -> (LocalAuthBuilder<MemoryUserStore>, TestClock) {
+    fn sessions(
+        users: &MemoryUserStore,
+        clock: &TestClock,
+        recorder: &Recorder,
+    ) -> SessionManager<MemorySessionStore> {
+        let clock = clock.clone();
+        SessionManager::builder(MemorySessionStore::new(users.clone()))
+            .events(recorder.clone())
+            .clock(move || clock.now())
+            .build()
+    }
+
+    fn builder_with_events() -> (TestBuilder, TestClock, Recorder) {
         let clock = TestClock::new();
+        let recorder = Recorder::default();
+        let users = MemoryUserStore::new();
+        let sessions = sessions(&users, &clock, &recorder);
         let for_auth = clock.clone();
-        let builder = LocalAuth::builder(MemoryUserStore::new())
+        let builder = LocalAuth::builder(users, sessions)
             .hasher(PasswordHasher::insecure_for_tests(HashLimits::default()).unwrap())
             .clock(move || for_auth.now());
+        (builder, clock, recorder)
+    }
+
+    fn builder() -> (TestBuilder, TestClock) {
+        let (builder, clock, _) = builder_with_events();
         (builder, clock)
     }
 
-    fn auth() -> (LocalAuth<MemoryUserStore>, TestClock) {
+    /// Log in from a browser and keep only the account, as most tests need.
+    async fn login(auth: &TestAuth, identifier: &str, password: &str) -> Result<User, LocalError> {
+        auth.login(identifier, password, SessionContext::web())
+            .await
+            .map(|login| login.user)
+    }
+
+    fn auth() -> (TestAuth, TestClock) {
         let (builder, clock) = builder();
         (builder.build().unwrap(), clock)
     }
@@ -517,7 +710,7 @@ mod tests {
         }
     }
 
-    async fn register_budi(auth: &LocalAuth<MemoryUserStore>) -> User {
+    async fn register_budi(auth: &TestAuth) -> User {
         let outcome = auth
             .register(registration("budi", "budi@example.com"))
             .await
@@ -527,16 +720,16 @@ mod tests {
     }
 
     /// Mark the account's email address as verified, as the verification flow would.
-    fn verify_email(auth: &LocalAuth<MemoryUserStore>, user: &User) -> User {
+    fn verify_email(auth: &TestAuth, user: &User) -> User {
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         auth.store()
             .update(user.id, |r| r.user.email_verified_at = Some(at));
         auth.store().get(user.id).unwrap().user
     }
 
-    async fn fail_login(auth: &LocalAuth<MemoryUserStore>, times: u32) {
+    async fn fail_login(auth: &TestAuth, times: u32) {
         for _ in 0..times {
-            let result = auth.login("budi", "wrong password").await;
+            let result = login(auth, "budi", "wrong password").await;
             assert!(matches!(result, Err(LocalError::InvalidCredentials)));
         }
     }
@@ -589,10 +782,10 @@ mod tests {
         assert!(!hash.contains(PASSWORD));
 
         let user = verify_email(&auth, &user);
-        assert_eq!(auth.login("budi", PASSWORD).await.unwrap(), user);
-        assert_eq!(auth.login("BUDI", PASSWORD).await.unwrap(), user);
+        assert_eq!(login(&auth, "budi", PASSWORD).await.unwrap(), user);
+        assert_eq!(login(&auth, "BUDI", PASSWORD).await.unwrap(), user);
         assert_eq!(
-            auth.login(" budi@example.com ", PASSWORD).await.unwrap(),
+            login(&auth, " budi@example.com ", PASSWORD).await.unwrap(),
             user
         );
     }
@@ -666,7 +859,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(auth.login("budi", PASSWORD).await.unwrap(), budi);
+        assert_eq!(login(&auth, "budi", PASSWORD).await.unwrap(), budi);
     }
 
     #[tokio::test]
@@ -770,18 +963,18 @@ mod tests {
             .unwrap()
             .clone();
 
-        let error = auth.login("budi", PASSWORD).await.unwrap_err();
+        let error = login(&auth, "budi", PASSWORD).await.unwrap_err();
         assert!(matches!(error, LocalError::EmailNotVerified));
         assert_eq!(error.public_message(), "Email address is not verified");
         assert_eq!(auth.store().get(user.id).unwrap().failed_login_count, 0);
 
         // Without the password the account looks like any other.
-        let error = auth.login("budi", "wrong password").await.unwrap_err();
+        let error = login(&auth, "budi", "wrong password").await.unwrap_err();
         assert!(matches!(error, LocalError::InvalidCredentials));
         assert_eq!(auth.store().get(user.id).unwrap().failed_login_count, 1);
 
         let user = verify_email(&auth, &user);
-        assert_eq!(auth.login("budi", PASSWORD).await.unwrap(), user);
+        assert_eq!(login(&auth, "budi", PASSWORD).await.unwrap(), user);
     }
 
     #[tokio::test]
@@ -797,7 +990,7 @@ mod tests {
             .clone();
 
         assert_eq!(user.email_verified_at, None);
-        assert_eq!(auth.login("budi", PASSWORD).await.unwrap(), user);
+        assert_eq!(login(&auth, "budi", PASSWORD).await.unwrap(), user);
     }
 
     #[tokio::test]
@@ -805,14 +998,13 @@ mod tests {
         let (auth, _) = auth();
         let budi = register_budi(&auth).await;
 
-        let wrong_password = auth.login("budi", "wrong password").await.unwrap_err();
-        let unknown_user = auth.login("nobody", PASSWORD).await.unwrap_err();
-        let unknown_email = auth
-            .login("nobody@example.com", PASSWORD)
+        let wrong_password = login(&auth, "budi", "wrong password").await.unwrap_err();
+        let unknown_user = login(&auth, "nobody", PASSWORD).await.unwrap_err();
+        let unknown_email = login(&auth, "nobody@example.com", PASSWORD)
             .await
             .unwrap_err();
-        let empty = auth.login("", "").await.unwrap_err();
-        let oversized = auth.login(&"x".repeat(5000), PASSWORD).await.unwrap_err();
+        let empty = login(&auth, "", "").await.unwrap_err();
+        let oversized = login(&auth, &"x".repeat(5000), PASSWORD).await.unwrap_err();
 
         for error in [
             &wrong_password,
@@ -832,7 +1024,7 @@ mod tests {
     async fn oversized_password_is_rejected_like_a_wrong_one() {
         let (auth, _) = auth();
         register_budi(&auth).await;
-        let result = auth.login("budi", &"a".repeat(100_000)).await;
+        let result = login(&auth, "budi", &"a".repeat(100_000)).await;
         assert!(matches!(result, Err(LocalError::InvalidCredentials)));
     }
 
@@ -842,7 +1034,7 @@ mod tests {
         let budi = register_budi(&auth).await;
         auth.store().update(budi.id, |r| r.password_hash = None);
 
-        let result = auth.login("budi", PASSWORD).await;
+        let result = login(&auth, "budi", PASSWORD).await;
         assert!(matches!(result, Err(LocalError::InvalidCredentials)));
         assert_eq!(auth.store().get(budi.id).unwrap().failed_login_count, 0);
     }
@@ -854,11 +1046,11 @@ mod tests {
         auth.store()
             .update(budi.id, |r| r.user.disabled_at = Some(clock.now()));
 
-        let error = auth.login("budi", PASSWORD).await.unwrap_err();
+        let error = login(&auth, "budi", PASSWORD).await.unwrap_err();
         assert!(matches!(error, LocalError::AccountDisabled));
         assert_eq!(error.public_message(), "Invalid username or password");
 
-        let error = auth.login("budi", "wrong password").await.unwrap_err();
+        let error = login(&auth, "budi", "wrong password").await.unwrap_err();
         assert!(matches!(error, LocalError::AccountDisabled));
         assert_eq!(auth.store().get(budi.id).unwrap().failed_login_count, 0);
     }
@@ -873,12 +1065,12 @@ mod tests {
         assert_eq!(record.failed_login_count, 4);
         assert_eq!(record.locked_until, None);
 
-        auth.login("budi", PASSWORD).await.unwrap();
+        login(&auth, "budi", PASSWORD).await.unwrap();
         assert_eq!(auth.store().get(budi.id).unwrap().failed_login_count, 0);
 
         // The count starts over, so four more failures still do not lock.
         fail_login(&auth, 4).await;
-        assert!(auth.login("budi", PASSWORD).await.is_ok());
+        assert!(login(&auth, "budi", PASSWORD).await.is_ok());
     }
 
     #[tokio::test]
@@ -891,12 +1083,12 @@ mod tests {
         assert_eq!(locked_until, clock.now() + Duration::from_secs(60));
 
         // The right password is refused while locked, with the generic message.
-        let error = auth.login("budi", PASSWORD).await.unwrap_err();
+        let error = login(&auth, "budi", PASSWORD).await.unwrap_err();
         assert!(matches!(error, LocalError::AccountLocked { until } if until == locked_until));
         assert_eq!(error.public_message(), "Invalid username or password");
 
         // Attempts during the lock neither count nor extend it.
-        let error = auth.login("budi", "wrong password").await.unwrap_err();
+        let error = login(&auth, "budi", "wrong password").await.unwrap_err();
         assert!(matches!(error, LocalError::AccountLocked { .. }));
         let record = auth.store().get(budi.id).unwrap();
         assert_eq!(record.failed_login_count, 5);
@@ -904,12 +1096,12 @@ mod tests {
 
         clock.advance(Duration::from_secs(59));
         assert!(matches!(
-            auth.login("budi", PASSWORD).await,
+            login(&auth, "budi", PASSWORD).await,
             Err(LocalError::AccountLocked { .. })
         ));
 
         clock.advance(Duration::from_secs(1));
-        assert_eq!(auth.login("budi", PASSWORD).await.unwrap(), budi);
+        assert_eq!(login(&auth, "budi", PASSWORD).await.unwrap(), budi);
         let record = auth.store().get(budi.id).unwrap();
         assert_eq!(record.failed_login_count, 0);
         assert_eq!(record.locked_until, None);
@@ -934,11 +1126,11 @@ mod tests {
 
         clock.advance(Duration::from_secs(119));
         assert!(matches!(
-            auth.login("budi", PASSWORD).await,
+            login(&auth, "budi", PASSWORD).await,
             Err(LocalError::AccountLocked { .. })
         ));
         clock.advance(Duration::from_secs(1));
-        assert!(auth.login("budi", PASSWORD).await.is_ok());
+        assert!(login(&auth, "budi", PASSWORD).await.is_ok());
     }
 
     #[tokio::test]
@@ -971,7 +1163,9 @@ mod tests {
     async fn busy_hasher_is_reported_as_busy() {
         let limits = HashLimits::default().max_concurrent(1).max_queued(1);
         let hasher = PasswordHasher::insecure_for_tests(limits).unwrap();
-        let auth = LocalAuth::builder(MemoryUserStore::new())
+        let users = MemoryUserStore::new();
+        let sessions = SessionManager::new(MemorySessionStore::new(users.clone()));
+        let auth = LocalAuth::builder(users, sessions)
             .hasher(hasher.clone())
             .build()
             .unwrap();
@@ -981,10 +1175,13 @@ mod tests {
         let (release, blocked) = hasher.occupy_worker();
         let filler = hasher.queue_noop();
 
-        let login = auth.login("budi", PASSWORD).await.unwrap_err();
-        assert!(matches!(login, LocalError::Busy));
-        assert_eq!(login.public_message(), "Service is busy, try again shortly");
-        let unknown = auth.login("nobody", PASSWORD).await.unwrap_err();
+        let refused = login(&auth, "budi", PASSWORD).await.unwrap_err();
+        assert!(matches!(refused, LocalError::Busy));
+        assert_eq!(
+            refused.public_message(),
+            "Service is busy, try again shortly"
+        );
+        let unknown = login(&auth, "nobody", PASSWORD).await.unwrap_err();
         assert!(matches!(unknown, LocalError::Busy));
         let register = auth
             .register(registration("siti", "siti@example.com"))
@@ -998,7 +1195,7 @@ mod tests {
         release.send(()).unwrap();
         blocked.await.unwrap().unwrap();
         filler.await.unwrap().unwrap();
-        assert!(auth.login("budi", PASSWORD).await.is_ok());
+        assert!(login(&auth, "budi", PASSWORD).await.is_ok());
     }
 
     #[test]
@@ -1007,5 +1204,440 @@ mod tests {
         assert!(!debug.contains(PASSWORD), "{debug}");
         let (auth, _) = auth();
         assert!(!format!("{auth:?}").contains("argon2"));
+    }
+
+    #[tokio::test]
+    async fn every_login_issues_a_new_active_session() {
+        let (auth, clock) = auth();
+        let budi = register_budi(&auth).await;
+        let ip = "203.0.113.7".parse().unwrap();
+
+        let first = auth
+            .login(
+                "budi",
+                PASSWORD,
+                SessionContext::web().ip(ip).user_agent("Mozilla/5.0"),
+            )
+            .await
+            .unwrap();
+        let second = auth
+            .login("budi", PASSWORD, SessionContext::mobile())
+            .await
+            .unwrap();
+
+        assert_eq!(first.user, budi);
+        assert_eq!(first.session.user_id, budi.id);
+        assert_eq!(first.session.state, SessionState::Active);
+        assert_eq!(first.session.kind, SessionKind::Web);
+        assert_eq!(first.session.ip, Some(ip));
+        assert_eq!(first.session.user_agent.as_deref(), Some("Mozilla/5.0"));
+        assert_eq!(first.session.created_at, clock.now());
+        assert_eq!(second.session.kind, SessionKind::Mobile);
+
+        // Two logins never share a session or a token.
+        assert_ne!(first.session.id, second.session.id);
+        assert_ne!(first.token.expose(), second.token.expose());
+        assert!(first.token.expose().starts_with("rusted_s_"));
+
+        // Both tokens work, each for its own session; the first login is not replaced.
+        let sessions = auth.sessions();
+        let validated = sessions.validate(first.token.expose()).await.unwrap();
+        assert_eq!(validated.session.id, first.session.id);
+        assert_eq!(validated.user, budi);
+        let validated = sessions.validate(second.token.expose()).await.unwrap();
+        assert_eq!(validated.session.id, second.session.id);
+        assert_eq!(sessions.list(budi.id).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn rejected_logins_create_no_session() {
+        let (auth, clock) = auth();
+        let budi = register_budi(&auth).await;
+
+        assert!(login(&auth, "budi", "wrong password").await.is_err());
+        assert!(login(&auth, "nobody", PASSWORD).await.is_err());
+        auth.store()
+            .update(budi.id, |r| r.user.disabled_at = Some(clock.now()));
+        assert!(login(&auth, "budi", PASSWORD).await.is_err());
+
+        assert!(auth.sessions().store().is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_ends_when_the_account_is_disabled() {
+        let (auth, clock) = auth();
+        let budi = register_budi(&auth).await;
+        let login = auth
+            .login("budi", PASSWORD, SessionContext::web())
+            .await
+            .unwrap();
+        let sessions = auth.sessions();
+        assert!(sessions.validate(login.token.expose()).await.is_ok());
+
+        auth.store()
+            .update(budi.id, |r| r.user.disabled_at = Some(clock.now()));
+        sessions.forget_user(budi.id);
+        let error = sessions.validate(login.token.expose()).await.unwrap_err();
+        assert!(matches!(error, SessionError::UserDisabled));
+    }
+
+    /// Give budi a hash made with other parameters than `auth` uses.
+    async fn store_outdated_hash(auth: &TestAuth, budi: &User) -> String {
+        let older = PasswordHasher::insecure(2, HashLimits::default(), Events::default()).unwrap();
+        let outdated = older.hash(PASSWORD).await.unwrap();
+        assert!(auth.hasher().needs_rehash(&outdated));
+        let stored = outdated.clone();
+        auth.store()
+            .update(budi.id, |r| r.password_hash = Some(stored));
+        outdated
+    }
+
+    #[tokio::test]
+    async fn outdated_hash_is_replaced_on_successful_login() {
+        let (builder, _, recorder) = builder_with_events();
+        let auth = builder.build().unwrap();
+        let budi = register_budi(&auth).await;
+        let outdated = store_outdated_hash(&auth, &budi).await;
+
+        // A failed login leaves the hash alone.
+        assert!(login(&auth, "budi", "wrong password").await.is_err());
+        let stored = auth.store().get(budi.id).unwrap().password_hash.unwrap();
+        assert_eq!(stored, outdated);
+
+        recorder.take();
+        login(&auth, "budi", PASSWORD).await.unwrap();
+        let upgraded = auth.store().get(budi.id).unwrap().password_hash.unwrap();
+        assert_ne!(upgraded, outdated);
+        assert!(!auth.hasher().needs_rehash(&upgraded));
+        assert!(auth.hasher().verify(PASSWORD, &upgraded).await.unwrap());
+        assert_eq!(
+            recorder.take_names(),
+            ["password_rehashed", "session_created", "login_succeeded"]
+        );
+
+        // The password still works and the current hash is not replaced again.
+        login(&auth, "budi", PASSWORD).await.unwrap();
+        let unchanged = auth.store().get(budi.id).unwrap().password_hash.unwrap();
+        assert_eq!(unchanged, upgraded);
+        assert_eq!(
+            recorder.take_names(),
+            ["session_created", "login_succeeded"]
+        );
+    }
+
+    /// A user store whose hash replacement fails or reports a concurrent change.
+    #[derive(Clone)]
+    struct NoRehash {
+        users: MemoryUserStore,
+        fail: bool,
+    }
+
+    impl UserStore for NoRehash {
+        async fn find_by_username(&self, username: &str) -> Result<Option<UserRecord>, StoreError> {
+            self.users.find_by_username(username).await
+        }
+
+        async fn find_by_email(&self, email: &str) -> Result<Option<UserRecord>, StoreError> {
+            self.users.find_by_email(email).await
+        }
+
+        async fn insert(&self, user: NewUser) -> Result<User, StoreError> {
+            self.users.insert(user).await
+        }
+
+        async fn record_failed_login(&self, id: Uuid) -> Result<u32, StoreError> {
+            self.users.record_failed_login(id).await
+        }
+
+        async fn set_locked_until(
+            &self,
+            id: Uuid,
+            until: Option<SystemTime>,
+        ) -> Result<(), StoreError> {
+            self.users.set_locked_until(id, until).await
+        }
+
+        async fn record_successful_login(&self, id: Uuid) -> Result<(), StoreError> {
+            self.users.record_successful_login(id).await
+        }
+
+        async fn replace_password_hash(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: String,
+        ) -> Result<bool, StoreError> {
+            if self.fail {
+                Err(StoreError::backend("database is read-only"))
+            } else {
+                Ok(false)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_rehash_does_not_fail_the_login() {
+        for fail in [true, false] {
+            let users = MemoryUserStore::new();
+            let recorder = Recorder::default();
+            let sessions = SessionManager::builder(MemorySessionStore::new(users.clone()))
+                .events(recorder.clone())
+                .build();
+            let store = NoRehash {
+                users: users.clone(),
+                fail,
+            };
+            let auth = LocalAuth::builder(store, sessions)
+                .hasher(PasswordHasher::insecure_for_tests(HashLimits::default()).unwrap())
+                .require_verified_email(false)
+                .build()
+                .unwrap();
+            let budi = auth
+                .register(registration("budi", "budi@example.com"))
+                .await
+                .unwrap()
+                .created()
+                .unwrap()
+                .clone();
+            let older =
+                PasswordHasher::insecure(2, HashLimits::default(), Events::default()).unwrap();
+            let outdated = older.hash(PASSWORD).await.unwrap();
+            let stored = outdated.clone();
+            users.update(budi.id, |r| r.password_hash = Some(stored));
+            recorder.take();
+
+            let login = auth
+                .login("budi", PASSWORD, SessionContext::web())
+                .await
+                .unwrap();
+            assert_eq!(login.user.id, budi.id);
+            assert!(auth.sessions().validate(login.token.expose()).await.is_ok());
+            let unchanged = users.get(budi.id).unwrap().password_hash.unwrap();
+            assert_eq!(unchanged, outdated);
+            assert_eq!(
+                recorder.take_names(),
+                ["session_created", "login_succeeded"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_hasher_during_rehash_does_not_fail_the_login() {
+        // One worker and no queue: the rehash is refused when it is submitted while the
+        // only worker is held, which the test arranges through the store.
+        #[derive(Clone)]
+        struct HoldWorker {
+            users: MemoryUserStore,
+            hasher: PasswordHasher,
+            held: Arc<Mutex<Vec<std::sync::mpsc::Sender<()>>>>,
+        }
+
+        impl UserStore for HoldWorker {
+            async fn find_by_username(
+                &self,
+                username: &str,
+            ) -> Result<Option<UserRecord>, StoreError> {
+                self.users.find_by_username(username).await
+            }
+
+            async fn find_by_email(&self, email: &str) -> Result<Option<UserRecord>, StoreError> {
+                self.users.find_by_email(email).await
+            }
+
+            async fn insert(&self, user: NewUser) -> Result<User, StoreError> {
+                self.users.insert(user).await
+            }
+
+            async fn record_failed_login(&self, id: Uuid) -> Result<u32, StoreError> {
+                self.users.record_failed_login(id).await
+            }
+
+            async fn set_locked_until(
+                &self,
+                id: Uuid,
+                until: Option<SystemTime>,
+            ) -> Result<(), StoreError> {
+                self.users.set_locked_until(id, until).await
+            }
+
+            /// Runs after the password was verified and before the rehash.
+            async fn record_successful_login(&self, id: Uuid) -> Result<(), StoreError> {
+                let (release, _blocked) = self.hasher.occupy_worker();
+                self.held.lock().unwrap().push(release);
+                self.users.record_successful_login(id).await
+            }
+
+            async fn replace_password_hash(
+                &self,
+                id: Uuid,
+                current: &str,
+                new: String,
+            ) -> Result<bool, StoreError> {
+                self.users.replace_password_hash(id, current, new).await
+            }
+        }
+
+        let limits = HashLimits::default().max_concurrent(1).max_queued(0);
+        let hasher = PasswordHasher::insecure_for_tests(limits).unwrap();
+        let users = MemoryUserStore::new();
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let store = HoldWorker {
+            users: users.clone(),
+            hasher: hasher.clone(),
+            held: Arc::clone(&held),
+        };
+        let sessions = SessionManager::new(MemorySessionStore::new(users.clone()));
+        let auth = LocalAuth::builder(store, sessions)
+            .hasher(hasher)
+            .require_verified_email(false)
+            .build()
+            .unwrap();
+        let budi = auth
+            .register(registration("budi", "budi@example.com"))
+            .await
+            .unwrap()
+            .created()
+            .unwrap()
+            .clone();
+        let older = PasswordHasher::insecure(2, HashLimits::default(), Events::default()).unwrap();
+        let outdated = older.hash(PASSWORD).await.unwrap();
+        let stored = outdated.clone();
+        users.update(budi.id, |r| r.password_hash = Some(stored));
+
+        let login = auth
+            .login("budi", PASSWORD, SessionContext::web())
+            .await
+            .unwrap();
+        assert_eq!(login.user.id, budi.id);
+        assert_eq!(held.lock().unwrap().len(), 1, "the worker was held");
+        let unchanged = users.get(budi.id).unwrap().password_hash.unwrap();
+        assert_eq!(unchanged, outdated);
+    }
+
+    #[tokio::test]
+    async fn logins_and_lockouts_are_reported_without_secrets() {
+        let (builder, clock, recorder) = builder_with_events();
+        let auth = builder.build().unwrap();
+        let budi = register_budi(&auth).await;
+        let ip = "203.0.113.7".parse().unwrap();
+        let context = || SessionContext::web().ip(ip).user_agent("Mozilla/5.0");
+
+        let unknown = "typed-my-password-here";
+        assert!(auth.login(unknown, PASSWORD, context()).await.is_err());
+        let events = recorder.take();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].user_id, None);
+        assert_eq!(events[0].ip, Some(ip));
+        assert_eq!(events[0].user_agent.as_deref(), Some("Mozilla/5.0"));
+        assert_eq!(events[0].at, clock.now());
+        assert_eq!(
+            events[0].kind,
+            AuthEventKind::LoginFailed {
+                reason: LoginFailure::UnknownAccount
+            }
+        );
+
+        for _ in 0..4 {
+            assert!(
+                auth.login("budi", "wrong password", context())
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(recorder.take_names(), ["login_failed"; 4]);
+
+        // The fifth failure locks the account.
+        assert!(
+            auth.login("budi", "wrong password", context())
+                .await
+                .is_err()
+        );
+        let events = recorder.take();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].user_id, Some(budi.id));
+        assert_eq!(
+            events[0].kind,
+            AuthEventKind::LoginFailed {
+                reason: LoginFailure::WrongPassword
+            }
+        );
+        assert_eq!(
+            events[1].kind,
+            AuthEventKind::AccountLocked {
+                until: clock.now() + Duration::from_secs(60),
+                failed_logins: 5
+            }
+        );
+
+        assert!(auth.login("budi", PASSWORD, context()).await.is_err());
+        let events = recorder.take();
+        assert_eq!(
+            events[0].kind,
+            AuthEventKind::LoginFailed {
+                reason: LoginFailure::AccountLocked
+            }
+        );
+
+        clock.advance(Duration::from_secs(60));
+        let login = auth.login("budi", PASSWORD, context()).await.unwrap();
+        let events = recorder.take();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].kind,
+            AuthEventKind::SessionCreated {
+                session_id: login.session.id,
+                kind: SessionKind::Web,
+                state: SessionState::Active
+            }
+        );
+        assert_eq!(
+            events[1].kind,
+            AuthEventKind::LoginSucceeded {
+                session_id: login.session.id
+            }
+        );
+        assert_eq!(events[1].user_id, Some(budi.id));
+
+        auth.store()
+            .update(budi.id, |r| r.user.disabled_at = Some(clock.now()));
+        assert!(auth.login("budi", PASSWORD, context()).await.is_err());
+        auth.store().update(budi.id, |r| {
+            r.user.disabled_at = None;
+            r.user.email_verified_at = None;
+        });
+        assert!(auth.login("budi", PASSWORD, context()).await.is_err());
+        let reasons: Vec<_> = recorder.take().into_iter().map(|e| e.kind).collect();
+        assert_eq!(
+            reasons,
+            [
+                AuthEventKind::LoginFailed {
+                    reason: LoginFailure::AccountDisabled
+                },
+                AuthEventKind::LoginFailed {
+                    reason: LoginFailure::EmailNotVerified
+                },
+            ]
+        );
+
+        // Nothing that was reported or returned gives away a secret.
+        let hash = auth.store().get(budi.id).unwrap().password_hash.unwrap();
+        let everything = format!("{:?} {login:?}", recorder.events());
+        for secret in [PASSWORD, unknown, hash.as_str(), login.token.expose()] {
+            assert!(!everything.contains(secret), "{everything}");
+        }
+        assert!(!everything.contains("rusted_s_"), "{everything}");
+    }
+
+    #[tokio::test]
+    async fn hasher_built_by_local_auth_reports_queue_waits() {
+        let recorder = Recorder::default();
+        let users = MemoryUserStore::new();
+        let sessions = SessionManager::builder(MemorySessionStore::new(users.clone()))
+            .events(recorder.clone())
+            .build();
+        let auth = LocalAuth::builder(users, sessions).build().unwrap();
+
+        assert!(login(&auth, "nobody", PASSWORD).await.is_err());
+        assert_eq!(recorder.waits().len(), 1);
     }
 }

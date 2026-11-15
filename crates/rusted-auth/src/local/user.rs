@@ -88,7 +88,7 @@ pub enum StoreError {
     #[error("email is already registered")]
     EmailTaken,
 
-    /// The account to update does not exist.
+    /// The account to update, or to create a session for, does not exist.
     #[error("user not found")]
     NotFound,
 
@@ -125,7 +125,9 @@ impl From<StoreError> for LocalError {
 ///   across accounts.
 /// - [`insert`](Self::insert) enforces both uniqueness rules atomically, so two concurrent
 ///   registrations cannot both succeed.
-/// - [`record_failed_login`](Self::record_failed_login) increments atomically.
+/// - [`record_failed_login`](Self::record_failed_login) increments atomically, and
+///   [`replace_password_hash`](Self::replace_password_hash) compares and replaces
+///   atomically.
 pub trait UserStore: Send + Sync + 'static {
     /// Look up an account by username.
     fn find_by_username(
@@ -161,6 +163,20 @@ pub trait UserStore: Send + Sync + 'static {
         &self,
         id: Uuid,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Replace the account's password hash with `new`, but only if the stored hash still
+    /// equals `current`. Returns whether it was replaced.
+    ///
+    /// Used to upgrade a hash made with outdated parameters after a successful login.
+    /// The comparison keeps a password change that happened in the meantime from being
+    /// undone, so it must be one atomic step, such as
+    /// `UPDATE users SET password_hash = $new WHERE id = $id AND password_hash = $current`.
+    fn replace_password_hash(
+        &self,
+        id: Uuid,
+        current: &str,
+        new: String,
+    ) -> impl Future<Output = Result<bool, StoreError>> + Send;
 }
 
 #[cfg(test)]

@@ -1,3 +1,5 @@
+use super::session::{NewSession, Session, SessionRecord, SessionState, SessionStore};
+use super::token::SessionTokenHash;
 use super::user::{NewUser, StoreError, User, UserRecord, UserStore};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
@@ -132,6 +134,244 @@ impl UserStore for MemoryUserStore {
             record.failed_login_count = 0;
             record.locked_until = None;
         })
+    }
+
+    async fn replace_password_hash(
+        &self,
+        id: Uuid,
+        current: &str,
+        new: String,
+    ) -> Result<bool, StoreError> {
+        let mut replaced = false;
+        self.update_or_not_found(id, |record| {
+            if record.password_hash.as_deref() == Some(current) {
+                record.password_hash = Some(new);
+                replaced = true;
+            }
+        })?;
+        Ok(replaced)
+    }
+}
+
+/// In-memory [`SessionStore`] for tests and examples.
+///
+/// It reads accounts from the [`MemoryUserStore`] it was created with, the way a database
+/// store joins the sessions table with the users table. Sessions are lost when the last
+/// clone is dropped. Clones share the same sessions.
+#[derive(Debug, Clone)]
+pub struct MemorySessionStore {
+    users: MemoryUserStore,
+    sessions: Arc<Mutex<Vec<StoredSession>>>,
+}
+
+#[derive(Debug, Clone)]
+struct StoredSession {
+    session: Session,
+    token_hash: SessionTokenHash,
+}
+
+impl MemorySessionStore {
+    /// An empty store for the sessions of the accounts in `users`.
+    pub fn new(users: MemoryUserStore) -> Self {
+        Self {
+            users,
+            sessions: Arc::default(),
+        }
+    }
+
+    /// The stored session `id`, whatever its state.
+    pub fn get(&self, id: Uuid) -> Option<Session> {
+        self.lock()
+            .iter()
+            .find(|s| s.session.id == id)
+            .map(|s| s.session.clone())
+    }
+
+    /// Change a stored session in place, for example to age it in a test. Returns `false`
+    /// when the session does not exist.
+    pub fn update(&self, id: Uuid, change: impl FnOnce(&mut Session)) -> bool {
+        match self.lock().iter_mut().find(|s| s.session.id == id) {
+            Some(stored) => {
+                change(&mut stored.session);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Number of sessions, including expired and revoked ones.
+    pub fn len(&self) -> usize {
+        self.lock().len()
+    }
+
+    /// `true` when there are no sessions.
+    pub fn is_empty(&self) -> bool {
+        self.lock().is_empty()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Vec<StoredSession>> {
+        self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl SessionStore for MemorySessionStore {
+    async fn insert(&self, new: NewSession) -> Result<Session, StoreError> {
+        if self.users.get(new.user_id).is_none() {
+            return Err(StoreError::NotFound);
+        }
+        let mut sessions = self.lock();
+        if sessions.iter().any(|s| s.token_hash == new.token_hash) {
+            return Err(StoreError::backend("duplicate session token hash"));
+        }
+        let session = Session {
+            id: Uuid::new_v4(),
+            user_id: new.user_id,
+            kind: new.kind,
+            state: new.state,
+            created_at: new.created_at,
+            last_seen_at: new.created_at,
+            idle_expires_at: new.idle_expires_at,
+            absolute_expires_at: new.absolute_expires_at,
+            ip: new.ip,
+            user_agent: new.user_agent,
+            revoked_at: None,
+            idp_sid: new.idp_sid,
+        };
+        sessions.push(StoredSession {
+            session: session.clone(),
+            token_hash: new.token_hash,
+        });
+        Ok(session)
+    }
+
+    async fn find_by_token_hash(
+        &self,
+        token_hash: &SessionTokenHash,
+    ) -> Result<Option<SessionRecord>, StoreError> {
+        let Some(stored) = self
+            .lock()
+            .iter()
+            .find(|s| s.token_hash == *token_hash)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .users
+            .get(stored.session.user_id)
+            .map(|account| SessionRecord {
+                session: stored.session,
+                token_hash: stored.token_hash,
+                user: account.user,
+            }))
+    }
+
+    async fn touch(
+        &self,
+        id: Uuid,
+        last_seen_at: SystemTime,
+        idle_expires_at: SystemTime,
+    ) -> Result<(), StoreError> {
+        let found = self.update(id, |session| {
+            session.last_seen_at = last_seen_at;
+            session.idle_expires_at = idle_expires_at;
+        });
+        if found {
+            Ok(())
+        } else {
+            Err(StoreError::NotFound)
+        }
+    }
+
+    async fn activate(
+        &self,
+        id: Uuid,
+        now: SystemTime,
+        idle_expires_at: SystemTime,
+        absolute_expires_at: SystemTime,
+    ) -> Result<Option<Session>, StoreError> {
+        let mut sessions = self.lock();
+        let Some(session) = sessions
+            .iter_mut()
+            .map(|s| &mut s.session)
+            .find(|s| s.id == id)
+        else {
+            return Ok(None);
+        };
+        if session.state != SessionState::PendingMfa
+            || session.revoked_at.is_some()
+            || session.absolute_expires_at <= now
+        {
+            return Ok(None);
+        }
+        session.state = SessionState::Active;
+        session.last_seen_at = now;
+        session.idle_expires_at = idle_expires_at;
+        session.absolute_expires_at = absolute_expires_at;
+        Ok(Some(session.clone()))
+    }
+
+    async fn revoke(
+        &self,
+        id: Uuid,
+        owner: Option<Uuid>,
+        at: SystemTime,
+    ) -> Result<Option<Session>, StoreError> {
+        let mut sessions = self.lock();
+        let session = sessions
+            .iter_mut()
+            .map(|s| &mut s.session)
+            .find(|s| s.id == id && owner.is_none_or(|owner| owner == s.user_id))
+            .filter(|s| s.revoked_at.is_none());
+        Ok(session.map(|session| {
+            session.revoked_at = Some(at);
+            session.clone()
+        }))
+    }
+
+    async fn revoke_all_for_user(
+        &self,
+        user_id: Uuid,
+        except: Option<Uuid>,
+        at: SystemTime,
+    ) -> Result<Vec<Uuid>, StoreError> {
+        let mut revoked = Vec::new();
+        for stored in self.lock().iter_mut() {
+            let session = &mut stored.session;
+            if session.user_id == user_id
+                && Some(session.id) != except
+                && session.revoked_at.is_none()
+            {
+                session.revoked_at = Some(at);
+                revoked.push(session.id);
+            }
+        }
+        Ok(revoked)
+    }
+
+    async fn list_active_for_user(
+        &self,
+        user_id: Uuid,
+        now: SystemTime,
+    ) -> Result<Vec<Session>, StoreError> {
+        let mut sessions: Vec<Session> = self
+            .lock()
+            .iter()
+            .map(|s| &s.session)
+            .filter(|s| {
+                s.user_id == user_id
+                    && s.state == SessionState::Active
+                    && s.revoked_at.is_none()
+                    && s.idle_expires_at > now
+                    && s.absolute_expires_at > now
+            })
+            .cloned()
+            .collect();
+        // Reversed first so that, with a stable sort, the later of two sessions created
+        // at the same instant comes first.
+        sessions.reverse();
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+        Ok(sessions)
     }
 }
 
