@@ -1,11 +1,14 @@
 use super::error::LocalError;
+use super::mail::{DynMailer, Mailer};
 use super::password::{HashLimits, PasswordHasher, PasswordPolicy};
 use super::validate;
 #[cfg(feature = "mfa")]
 use crate::mfa::SecondFactor;
+use crate::session::attempts::{AttemptStore, DynAttemptStore, MemoryAttemptStore};
 use crate::session::event::{AuthEvent, AuthEventKind, Events, LoginFailure};
 use crate::session::manager::{Clock, SessionManager};
 use crate::session::model::{Session, SessionContext, SessionState, SessionStore};
+use crate::session::one_time::{DynOneTimeTokenStore, OneTimeTokenStore};
 use crate::session::token::SessionToken;
 use crate::session::user::{NewUser, StoreError, User, UserRecord, UserStore};
 use std::fmt;
@@ -70,6 +73,96 @@ impl LockoutPolicy {
                 .saturating_mul(factor)
                 .min(self.max_duration),
         )
+    }
+}
+
+/// Lifetimes of email links and how many emails others can cause an account to receive.
+///
+/// The limit covers the emails that someone other than the owner can trigger: the notice
+/// about a registration with the address, a password reset link, a verification link
+/// sent again, and the lockout notice. With the defaults an account receives at most 3
+/// of them in 15 minutes; further requests succeed as usual but send nothing and create
+/// no new link, so earlier links keep working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EmailPolicy {
+    /// How long a verification link works. Default: 24 hours.
+    pub verify_email_ttl: Duration,
+    /// How long a password reset link works. Default: 1 hour, at most
+    /// [`MAX_RESET_PASSWORD_TTL`].
+    pub reset_password_ttl: Duration,
+    /// Emails per account and [`window`](Self::window). Default: 3.
+    pub max_emails: u32,
+    /// Period over which [`max_emails`](Self::max_emails) counts. Default: 15 minutes.
+    pub window: Duration,
+}
+
+/// Longest lifetime of a password reset link.
+pub const MAX_RESET_PASSWORD_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+impl Default for EmailPolicy {
+    fn default() -> Self {
+        Self {
+            verify_email_ttl: Duration::from_secs(24 * 60 * 60),
+            reset_password_ttl: Duration::from_secs(60 * 60),
+            max_emails: 3,
+            window: Duration::from_secs(15 * 60),
+        }
+    }
+}
+
+impl EmailPolicy {
+    /// Set [`verify_email_ttl`](Self::verify_email_ttl).
+    pub fn verify_email_ttl(mut self, ttl: Duration) -> Self {
+        self.verify_email_ttl = ttl;
+        self
+    }
+
+    /// Set [`reset_password_ttl`](Self::reset_password_ttl). Longer values are cut to
+    /// [`MAX_RESET_PASSWORD_TTL`].
+    pub fn reset_password_ttl(mut self, ttl: Duration) -> Self {
+        self.reset_password_ttl = ttl.min(MAX_RESET_PASSWORD_TTL);
+        self
+    }
+
+    /// Set [`max_emails`](Self::max_emails) per [`window`](Self::window). Values below
+    /// 1 are raised to 1.
+    pub fn limit(mut self, max_emails: u32, window: Duration) -> Self {
+        self.max_emails = max_emails.max(1);
+        self.window = window;
+        self
+    }
+}
+
+/// How many wrong current passwords [`LocalAuth::change_password`] accepts.
+///
+/// With the defaults, the 5th wrong password within 15 minutes revokes the session that
+/// made the attempts, and further changes are refused until the period ends. This count
+/// is separate from the failed logins that lock an account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PasswordChangePolicy {
+    /// Wrong current passwords per account and [`window`](Self::window). Default: 5.
+    pub max_attempts: u32,
+    /// Period over which they count. Default: 15 minutes.
+    pub window: Duration,
+}
+
+impl Default for PasswordChangePolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            window: Duration::from_secs(15 * 60),
+        }
+    }
+}
+
+impl PasswordChangePolicy {
+    /// Set both values. Attempts below 1 are raised to 1.
+    pub fn limit(mut self, max_attempts: u32, window: Duration) -> Self {
+        self.max_attempts = max_attempts.max(1);
+        self.window = window;
+        self
     }
 }
 
@@ -161,16 +254,21 @@ impl Login {
 /// Cheap to clone; clones share the stores, the session manager and the password hasher.
 ///
 /// ```rust
-/// use rusted_auth::local::{LocalAuth, Registration};
+/// use rusted_auth::local::{LocalAuth, NoMailer, Registration};
 /// use rusted_auth::session::{
-///     MemorySessionStore, MemoryUserStore, SessionContext, SessionManager,
+///     MemoryOneTimeTokenStore, MemorySessionStore, MemoryUserStore, SessionContext,
+///     SessionManager,
 /// };
 /// use std::time::SystemTime;
 ///
 /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// let users = MemoryUserStore::new();
 /// let sessions = SessionManager::new(MemorySessionStore::new(users.clone()));
-/// let auth = LocalAuth::builder(users, sessions).build()?;
+/// let auth = LocalAuth::builder(users, sessions)
+///     // A real application queues the emails for delivery; see `Mailer`.
+///     .mailer(NoMailer)
+///     .tokens(MemoryOneTimeTokenStore::new())
+///     .build()?;
 ///
 /// let outcome = auth
 ///     .register(Registration {
@@ -181,8 +279,9 @@ impl Login {
 ///     })
 ///     .await?;
 ///
-/// // Logging in requires a verified email address. The verification flow normally
-/// // records this; here the test store is edited directly.
+/// // Logging in requires a verified email address. Normally the owner opens the link
+/// // from the verification email (`LocalAuth::verify_email`); here the test store is
+/// // edited directly.
 /// let id = outcome.created().expect("a new account").id;
 /// auth.store()
 ///     .update(id, |account| account.user.email_verified_at = Some(SystemTime::now()));
@@ -209,6 +308,11 @@ pub struct LocalAuth<U, S> {
 struct Inner<U, S> {
     store: U,
     sessions: SessionManager<S>,
+    mailer: Arc<dyn DynMailer>,
+    tokens: Arc<dyn DynOneTimeTokenStore>,
+    attempts: Arc<dyn DynAttemptStore>,
+    email_policy: EmailPolicy,
+    password_change: PasswordChangePolicy,
     events: Events,
     hasher: PasswordHasher,
     lockout: LockoutPolicy,
@@ -234,6 +338,8 @@ impl<U, S> fmt::Debug for LocalAuth<U, S> {
             .field("hasher", &self.inner.hasher)
             .field("lockout", &self.inner.lockout)
             .field("password_policy", &self.inner.password_policy)
+            .field("email_policy", &self.inner.email_policy)
+            .field("password_change", &self.inner.password_change)
             .field("reveal_existing_email", &self.inner.reveal_existing_email)
             .field("require_verified_email", &self.inner.require_verified_email)
             .finish_non_exhaustive()
@@ -244,6 +350,11 @@ impl<U, S> fmt::Debug for LocalAuth<U, S> {
 pub struct LocalAuthBuilder<U, S> {
     store: U,
     sessions: SessionManager<S>,
+    mailer: Option<Arc<dyn DynMailer>>,
+    tokens: Option<Arc<dyn DynOneTimeTokenStore>>,
+    attempts: Arc<dyn DynAttemptStore>,
+    email_policy: EmailPolicy,
+    password_change: PasswordChangePolicy,
     hasher: Option<PasswordHasher>,
     hash_limits: HashLimits,
     lockout: LockoutPolicy,
@@ -256,6 +367,43 @@ pub struct LocalAuthBuilder<U, S> {
 }
 
 impl<U: UserStore, S: SessionStore> LocalAuthBuilder<U, S> {
+    /// Where the account emails go: verification and reset links, and notices about
+    /// registrations, lockouts and password changes. **Required**; pass
+    /// [`NoMailer`](super::NoMailer) to send nothing. See [`Mailer`] for the contract,
+    /// above all that `send` must not wait for delivery.
+    pub fn mailer(mut self, mailer: impl Mailer) -> Self {
+        self.mailer = Some(Arc::new(mailer));
+        self
+    }
+
+    /// Where verification and reset tokens are kept. **Required**. Every process that
+    /// serves the links must use the same store, since a link sent by one process may be
+    /// opened on another.
+    pub fn tokens(mut self, store: impl OneTimeTokenStore) -> Self {
+        self.tokens = Some(Arc::new(store));
+        self
+    }
+
+    /// Where emails per account and wrong current passwords are counted. The default, a
+    /// [`MemoryAttemptStore`], counts in each process separately; with several processes,
+    /// give them one shared store. It can be the store given to `MfaBuilder::attempts`.
+    pub fn attempts(mut self, store: impl AttemptStore) -> Self {
+        self.attempts = Arc::new(store);
+        self
+    }
+
+    /// Link lifetimes and the email limit per account.
+    pub fn email_policy(mut self, policy: EmailPolicy) -> Self {
+        self.email_policy = policy;
+        self
+    }
+
+    /// The limit on wrong current passwords in [`LocalAuth::change_password`].
+    pub fn password_change_policy(mut self, policy: PasswordChangePolicy) -> Self {
+        self.password_change = policy;
+        self
+    }
+
     /// Require the second factors of `mfa` at login: an account with a confirmed TOTP
     /// authenticator then gets a session in state
     /// [`PendingMfa`](SessionState::PendingMfa) after a correct password, which
@@ -333,7 +481,16 @@ impl<U: UserStore, S: SessionStore> LocalAuthBuilder<U, S> {
     /// Unless a [`hasher`](Self::hasher) was supplied this creates one, which computes a
     /// password hash on the calling thread (see [`PasswordHasher::new`]) and reports its
     /// queue waits to the session manager's event sink.
+    ///
+    /// Fails with [`LocalError::Configuration`] when [`mailer`](Self::mailer) or
+    /// [`tokens`](Self::tokens) was not called.
     pub fn build(self) -> Result<LocalAuth<U, S>, LocalError> {
+        let mailer = self.mailer.ok_or(LocalError::Configuration(
+            "LocalAuthBuilder::mailer was not called; pass NoMailer to send no email",
+        ))?;
+        let tokens = self.tokens.ok_or(LocalError::Configuration(
+            "LocalAuthBuilder::tokens was not called",
+        ))?;
         let events = self.sessions.events().clone();
         let hasher = match self.hasher {
             Some(hasher) => hasher,
@@ -343,6 +500,11 @@ impl<U: UserStore, S: SessionStore> LocalAuthBuilder<U, S> {
             inner: Arc::new(Inner {
                 store: self.store,
                 sessions: self.sessions,
+                mailer,
+                tokens,
+                attempts: self.attempts,
+                email_policy: self.email_policy,
+                password_change: self.password_change,
                 events,
                 hasher,
                 lockout: self.lockout,
@@ -367,6 +529,11 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
         LocalAuthBuilder {
             store,
             sessions,
+            mailer: None,
+            tokens: None,
+            attempts: Arc::new(MemoryAttemptStore::new()),
+            email_policy: EmailPolicy::default(),
+            password_change: PasswordChangePolicy::default(),
             hasher: None,
             hash_limits: HashLimits::default(),
             lockout: LockoutPolicy::default(),
@@ -461,10 +628,12 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
         match inner.store.insert(new_user).await {
             Ok(user) => {
                 tracing::debug!(user_id = %user.id, "local account registered");
+                self.send_verification(&user).await;
                 Ok(RegistrationOutcome::Created(user))
             }
             Err(StoreError::EmailTaken) if !inner.reveal_existing_email => {
                 tracing::debug!("registration for an email address that already has an account");
+                self.notify_registration_attempt(email).await;
                 Ok(RegistrationOutcome::EmailAlreadyRegistered {
                     email: email.to_owned(),
                 })
@@ -563,6 +732,11 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
                         failed_logins: failures,
                     }
                 });
+                // Only at the first lock of a series of failures, so that someone
+                // guessing cannot fill the owner's inbox.
+                if failures == inner.lockout.threshold.max(1) {
+                    self.notify_lockout(now, &user, until, &context).await;
+                }
             } else {
                 tracing::debug!(user_id = %user.id, failures, "login rejected: wrong password");
             }
@@ -699,6 +873,8 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
     }
 }
 
+mod account;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,6 +924,8 @@ mod tests {
         let sessions = sessions(&users, &clock, &recorder);
         let for_auth = clock.clone();
         let builder = LocalAuth::builder(users, sessions)
+            .mailer(crate::local::NoMailer)
+            .tokens(crate::session::MemoryOneTimeTokenStore::new())
             .hasher(PasswordHasher::insecure_for_tests(HashLimits::default()).unwrap())
             .clock(move || for_auth.now());
         (builder, clock, recorder)
@@ -1235,6 +1413,8 @@ mod tests {
         let users = MemoryUserStore::new();
         let sessions = SessionManager::new(MemorySessionStore::new(users.clone()));
         let auth = LocalAuth::builder(users, sessions)
+            .mailer(crate::local::NoMailer)
+            .tokens(crate::session::MemoryOneTimeTokenStore::new())
             .hasher(hasher.clone())
             .build()
             .unwrap();
@@ -1430,6 +1610,14 @@ mod tests {
             self.users.record_successful_login(id).await
         }
 
+        async fn mark_email_verified(&self, id: Uuid, at: SystemTime) -> Result<bool, StoreError> {
+            self.users.mark_email_verified(id, at).await
+        }
+
+        async fn reset_password(&self, id: Uuid, hash: String) -> Result<(), StoreError> {
+            self.users.reset_password(id, hash).await
+        }
+
         async fn replace_password_hash(
             &self,
             _: Uuid,
@@ -1457,6 +1645,8 @@ mod tests {
                 fail,
             };
             let auth = LocalAuth::builder(store, sessions)
+                .mailer(crate::local::NoMailer)
+                .tokens(crate::session::MemoryOneTimeTokenStore::new())
                 .hasher(PasswordHasher::insecure_for_tests(HashLimits::default()).unwrap())
                 .require_verified_email(false)
                 .build()
@@ -1536,6 +1726,18 @@ mod tests {
                 self.users.record_successful_login(id).await
             }
 
+            async fn mark_email_verified(
+                &self,
+                id: Uuid,
+                at: SystemTime,
+            ) -> Result<bool, StoreError> {
+                self.users.mark_email_verified(id, at).await
+            }
+
+            async fn reset_password(&self, id: Uuid, hash: String) -> Result<(), StoreError> {
+                self.users.reset_password(id, hash).await
+            }
+
             async fn replace_password_hash(
                 &self,
                 id: Uuid,
@@ -1557,6 +1759,8 @@ mod tests {
         };
         let sessions = SessionManager::new(MemorySessionStore::new(users.clone()));
         let auth = LocalAuth::builder(store, sessions)
+            .mailer(crate::local::NoMailer)
+            .tokens(crate::session::MemoryOneTimeTokenStore::new())
             .hasher(hasher)
             .require_verified_email(false)
             .build()
@@ -1705,7 +1909,11 @@ mod tests {
         let sessions = SessionManager::builder(MemorySessionStore::new(users.clone()))
             .events(recorder.clone())
             .build();
-        let auth = LocalAuth::builder(users, sessions).build().unwrap();
+        let auth = LocalAuth::builder(users, sessions)
+            .mailer(crate::local::NoMailer)
+            .tokens(crate::session::MemoryOneTimeTokenStore::new())
+            .build()
+            .unwrap();
 
         assert!(login(&auth, "nobody", PASSWORD).await.is_err());
         assert_eq!(recorder.waits().len(), 1);

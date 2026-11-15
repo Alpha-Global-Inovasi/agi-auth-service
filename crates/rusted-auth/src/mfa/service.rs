@@ -1,6 +1,5 @@
 //! The second-factor service.
 
-use super::attempts::{AttemptScope, AttemptStore, DynAttemptStore, MemoryAttemptStore};
 use super::error::MfaError;
 use super::recovery::{
     MAX_RECOVERY_CODE_DIGITS, MAX_RECOVERY_CODES, MIN_RECOVERY_CODE_DIGITS, RecoveryCodeHash,
@@ -9,6 +8,7 @@ use super::recovery::{
 use super::store::{MfaStore, TotpRecord};
 use super::totp::{Secret, TotpCheck, TotpConfig, otpauth_uri};
 use crate::encryption::Keyring;
+use crate::session::attempts::{AttemptScope, AttemptStore, DynAttemptStore, MemoryAttemptStore};
 use crate::session::event::{AuthEvent, AuthEventKind, Events, MfaFailure, MfaMethod};
 use crate::session::manager::Clock;
 use crate::session::{AuthenticatedSession, Session, SessionManager, SessionStore, User};
@@ -956,7 +956,7 @@ impl<M: MfaStore, S: SessionStore> Mfa<M, S> {
 }
 
 #[cfg(feature = "local")]
-use super::attempts::BoxFuture;
+use crate::session::attempts::BoxFuture;
 
 #[cfg(feature = "local")]
 /// What a login needs to know about second factors, without the store's type.

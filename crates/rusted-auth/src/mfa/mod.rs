@@ -87,8 +87,9 @@
 //!
 //! Secrets, TOTP codes and recovery codes never appear in logs, events, errors or
 //! `Debug` output.
+//!
+//! [`AttemptStore`]: crate::session::AttemptStore
 
-mod attempts;
 mod error;
 mod memory;
 mod recovery;
@@ -96,7 +97,6 @@ mod service;
 mod store;
 mod totp;
 
-pub use attempts::{AttemptScope, AttemptStore, MemoryAttemptStore};
 pub use error::{MfaError, MfaErrorKind};
 pub use memory::MemoryMfaStore;
 pub use recovery::{

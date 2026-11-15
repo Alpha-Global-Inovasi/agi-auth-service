@@ -151,6 +151,25 @@ impl UserStore for MemoryUserStore {
         })?;
         Ok(replaced)
     }
+
+    async fn mark_email_verified(&self, id: Uuid, at: SystemTime) -> Result<bool, StoreError> {
+        let mut changed = false;
+        self.update_or_not_found(id, |record| {
+            if record.user.email_verified_at.is_none() {
+                record.user.email_verified_at = Some(at);
+                changed = true;
+            }
+        })?;
+        Ok(changed)
+    }
+
+    async fn reset_password(&self, id: Uuid, password_hash: String) -> Result<(), StoreError> {
+        self.update_or_not_found(id, |record| {
+            record.password_hash = Some(password_hash);
+            record.failed_login_count = 0;
+            record.locked_until = None;
+        })
+    }
 }
 
 /// In-memory [`SessionStore`] for tests and examples.
@@ -463,6 +482,47 @@ mod tests {
         assert_eq!(record.locked_until, None);
 
         let missing = store.record_failed_login(Uuid::new_v4()).await;
+        assert!(matches!(missing, Err(StoreError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn email_verification_is_recorded_once() {
+        let store = MemoryUserStore::new();
+        let id = store
+            .insert(new_user("budi", "budi@example.com"))
+            .await
+            .unwrap()
+            .id;
+        let first = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
+        let second = first + std::time::Duration::from_secs(10);
+
+        assert!(store.mark_email_verified(id, first).await.unwrap());
+        assert!(!store.mark_email_verified(id, second).await.unwrap());
+        assert_eq!(store.get(id).unwrap().user.email_verified_at, Some(first));
+        let missing = store.mark_email_verified(Uuid::new_v4(), first).await;
+        assert!(matches!(missing, Err(StoreError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn password_reset_replaces_the_hash_and_clears_the_lock() {
+        let store = MemoryUserStore::new();
+        let id = store
+            .insert(new_user("budi", "budi@example.com"))
+            .await
+            .unwrap()
+            .id;
+        store.record_failed_login(id).await.unwrap();
+        store
+            .set_locked_until(id, Some(SystemTime::now()))
+            .await
+            .unwrap();
+
+        store.reset_password(id, "new-hash".into()).await.unwrap();
+        let record = store.get(id).unwrap();
+        assert_eq!(record.password_hash.as_deref(), Some("new-hash"));
+        assert_eq!(record.failed_login_count, 0);
+        assert_eq!(record.locked_until, None);
+        let missing = store.reset_password(Uuid::new_v4(), "x".into()).await;
         assert!(matches!(missing, Err(StoreError::NotFound)));
     }
 }

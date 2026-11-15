@@ -1,6 +1,6 @@
-//! Counters of wrong second-factor codes.
+//! Counters of failed attempts, such as wrong second-factor codes.
 
-use crate::session::StoreError;
+use super::user::StoreError;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -20,22 +20,29 @@ pub enum AttemptScope {
     /// Codes that confirm a change to an account's second factor. The key is the
     /// account.
     Change,
+    /// Emails that someone other than the account owner can cause to be sent, such as a
+    /// password reset link. The key is the receiving account.
+    Email,
+    /// Wrong current passwords given to change the password. The key is the account.
+    PasswordChange,
 }
 
 impl AttemptScope {
-    /// The name to store: `login` or `change`.
+    /// The name to store: `login`, `change`, `email` or `password_change`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Login => "login",
             Self::Change => "change",
+            Self::Email => "email",
+            Self::PasswordChange => "password_change",
         }
     }
 }
 
-/// Shared counters of wrong second-factor codes, for example an `mfa_attempts` table
+/// Shared counters of failed attempts, for example an `auth_attempts` table
 /// (`scope`, `key`, `count`, `expires_at`, primary key `(scope, key)`).
 ///
-/// [`Mfa`](super::Mfa) counts each code before checking it, gives the attempt back
+/// `mfa::Mfa` counts each code before checking it, gives the attempt back
 /// when the check failed on the server's side, and clears the counter when a code is
 /// accepted or the login is cancelled. Without a store of its own it uses a
 /// [`MemoryAttemptStore`], whose counters each process keeps for itself. With several
@@ -48,14 +55,14 @@ impl AttemptScope {
 /// process cannot pass the limit together. In Postgres:
 ///
 /// ```sql
-/// INSERT INTO mfa_attempts (scope, key, count, expires_at)
+/// INSERT INTO auth_attempts (scope, key, count, expires_at)
 /// VALUES ($1, $2, 1, $4)
 /// ON CONFLICT (scope, key) DO UPDATE SET
-///     count = CASE WHEN mfa_attempts.expires_at <= $5 THEN 1
-///                  ELSE mfa_attempts.count + 1 END,
-///     expires_at = CASE WHEN mfa_attempts.expires_at <= $5 THEN $4
-///                       ELSE mfa_attempts.expires_at END
-/// WHERE mfa_attempts.expires_at <= $5 OR mfa_attempts.count < $3
+///     count = CASE WHEN auth_attempts.expires_at <= $5 THEN 1
+///                  ELSE auth_attempts.count + 1 END,
+///     expires_at = CASE WHEN auth_attempts.expires_at <= $5 THEN $4
+///                       ELSE auth_attempts.expires_at END
+/// WHERE auth_attempts.expires_at <= $5 OR auth_attempts.count < $3
 /// RETURNING count
 /// ```
 ///
@@ -92,7 +99,7 @@ pub trait AttemptStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
-/// An in-memory [`AttemptStore`], the default of [`Mfa`](super::Mfa).
+/// An in-memory [`AttemptStore`], the default of `mfa::Mfa`.
 ///
 /// The counters belong to this process; see [`AttemptStore`] for when that is not
 /// enough. Clones share the same counters. Counters that have ended are dropped once
@@ -169,8 +176,9 @@ impl AttemptStore for MemoryAttemptStore {
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// [`AttemptStore`] without its type, so that [`Mfa`](super::Mfa) keeps two type
+/// [`AttemptStore`] without its type, so that the services using it keep their type
 /// parameters.
+#[cfg_attr(not(any(feature = "local", feature = "mfa")), allow(dead_code))]
 pub(crate) trait DynAttemptStore: Send + Sync {
     fn dyn_begin(
         &self,
@@ -290,5 +298,7 @@ mod tests {
         );
         assert_eq!(AttemptScope::Login.as_str(), "login");
         assert_eq!(scope.as_str(), "change");
+        assert_eq!(AttemptScope::Email.as_str(), "email");
+        assert_eq!(AttemptScope::PasswordChange.as_str(), "password_change");
     }
 }

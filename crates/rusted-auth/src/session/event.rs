@@ -208,6 +208,62 @@ pub enum AuthEventKind {
         /// Codes in the new set.
         count: usize,
     },
+    /// A password reset link was requested for the account and is being sent. Not
+    /// reported for addresses without an account, or when the
+    /// [`EmailThrottled`](Self::EmailThrottled) limit stopped it.
+    PasswordResetRequested,
+    /// The password was set with a reset link. Every session of the account was
+    /// revoked.
+    PasswordReset,
+    /// The owner changed the password from a signed-in session. The account's other
+    /// sessions were revoked.
+    PasswordChanged {
+        /// The session the change was made from, which stays signed in.
+        session_id: Uuid,
+    },
+    /// The email address was verified with a link.
+    EmailVerified,
+    /// The application's mailer refused an email. The operation that wanted to send
+    /// it went on as if it had been sent.
+    EmailSendFailed {
+        /// Which email.
+        email: EmailKind,
+    },
+    /// An email was not sent because the account received too many of this kind of
+    /// email recently, or because the counter could not be read.
+    EmailThrottled {
+        /// Which email.
+        email: EmailKind,
+    },
+}
+
+/// Which email an [`AuthEvent`] is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum EmailKind {
+    /// A link to verify the email address.
+    VerifyEmail,
+    /// A link to reset the password.
+    PasswordReset,
+    /// A notice that the account was locked after failed logins.
+    AccountLocked,
+    /// A notice that someone tried to register with the address.
+    RegistrationAttempt,
+    /// A notice that the password was changed or reset.
+    PasswordChanged,
+}
+
+impl EmailKind {
+    /// A stable snake_case name, suitable for event metadata or a metric label.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::VerifyEmail => "verify_email",
+            Self::PasswordReset => "password_reset",
+            Self::AccountLocked => "account_locked",
+            Self::RegistrationAttempt => "registration_attempt",
+            Self::PasswordChanged => "password_changed",
+        }
+    }
 }
 
 /// A way to complete the second authentication step.
@@ -272,6 +328,12 @@ impl AuthEventKind {
             Self::TotpEnabled => "totp_enabled",
             Self::TotpDisabled => "totp_disabled",
             Self::RecoveryCodesGenerated { .. } => "recovery_codes_generated",
+            Self::PasswordResetRequested => "password_reset_requested",
+            Self::PasswordReset => "password_reset",
+            Self::PasswordChanged { .. } => "password_changed",
+            Self::EmailVerified => "email_verified",
+            Self::EmailSendFailed { .. } => "email_send_failed",
+            Self::EmailThrottled { .. } => "email_throttled",
         }
     }
 }

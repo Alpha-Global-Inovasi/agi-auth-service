@@ -27,9 +27,36 @@
 //!   second factors configured (`LocalAuthBuilder::mfa`, `mfa` feature), an account
 //!   with TOTP gets a session that waits for the second step instead
 //!   ([`Login::mfa_required`]).
+//! - [`LocalAuth::verify_email`] takes the token from the verification link sent at
+//!   registration; [`LocalAuth::resend_verification`] sends a new link.
+//! - [`LocalAuth::request_password_reset`] sends a reset link and
+//!   [`LocalAuth::reset_password`] sets the new password with it, signing out every
+//!   session. [`LocalAuth::change_password`] changes it from a signed-in session and
+//!   signs out the others.
 //! - [`LocalAuth::sessions`] gives the [`SessionManager`], which checks the token on
 //!   later requests, lists an account's sessions and revokes them. Sessions are
 //!   described in the [`session`](crate::session) module.
+//!
+//! # Emails
+//!
+//! [`LocalAuth`] decides which emails to send and hands them to the application's
+//! [`Mailer`] as [`AuthEmail`] values: a verification link for a new account, a reset
+//! link, and notices when someone registers an address that already has an account,
+//! when the account is locked, and when the password changes. The application renders
+//! them and builds the links. The mailer is required; [`NoMailer`] sends nothing.
+//!
+//! The mailer must queue emails rather than wait for delivery, and its errors are not
+//! returned to the caller: otherwise the time or the outcome of a password reset
+//! request would tell whether the address is registered. The emails others can cause
+//! (registration notices, reset links, verification links sent again, lockout notices)
+//! are limited per account ([`EmailPolicy`]): 3 in 15 minutes by default.
+//!
+//! Links carry single-use tokens ([`OneTimeToken`]) with the prefix `rusted_t_`, which
+//! secret scanners can match with `rusted_t_[A-Za-z0-9_-]{43}`. Only their SHA-256
+//! hash is stored, in the [`OneTimeTokenStore`] given to the builder. A verification
+//! link works for 24 hours and a reset link for 1 hour; a new link replaces the
+//! account's earlier one, and a token only works while the account still has the
+//! address it was sent to. Neither link signs the user in.
 //!
 //! # Limits of hiding registered email addresses
 //!
@@ -60,16 +87,20 @@
 //! # What the caller still has to do
 //!
 //! - Rate limit login, registration and the username check per client address.
-//! - Mark the email address as verified once its owner has proven control of it.
 //! - Deliver the session token to the client and read it back on later requests (a
 //!   cookie for browsers, a header for mobile apps), including CSRF protection for
 //!   cookies.
-//! - Call [`SessionManager::revoke_others`] when a password is changed or reset.
-//! - Delete expired and revoked sessions from the store from time to time.
-//! - Send the verification email for a new account, and the notice to the owner when
-//!   someone registers an address that already has an account.
+//! - Implement [`Mailer`] by queueing the emails, render them, and build the links.
+//!   Open a link with a page that sends the token back with a POST request, not with
+//!   the GET request itself: mail scanners follow links and would use the token up.
+//!   Serve that page with `Referrer-Policy: no-referrer`.
+//! - Rate limit the password reset and resend forms per client address.
+//! - Delete expired and revoked sessions, and used and expired tokens, from the stores
+//!   from time to time.
 //!
 //! [`MemorySessionStore`]: crate::session::MemorySessionStore
+//! [`OneTimeToken`]: crate::session::OneTimeToken
+//! [`OneTimeTokenStore`]: crate::session::OneTimeTokenStore
 //! [`MemoryUserStore`]: crate::session::MemoryUserStore
 //! [`SessionError`]: crate::session::SessionError
 //! [`SessionManager`]: crate::session::SessionManager
@@ -78,15 +109,20 @@
 //! [`UserStore`]: crate::session::UserStore
 
 mod error;
+mod mail;
 mod password;
 mod service;
 mod validate;
 
 pub use error::{LocalError, LocalErrorKind};
+#[cfg(any(test, feature = "test-util"))]
+pub use mail::RecordingMailer;
+pub use mail::{AuthEmail, Mailer, NoMailer, PasswordChangeVia};
 pub use password::{
     HashLimits, MAX_PASSWORD_CHARS, MIN_PASSWORD_CHARS, PasswordHasher, PasswordPolicy,
     validate_password,
 };
 pub use service::{
-    LocalAuth, LocalAuthBuilder, LockoutPolicy, Login, Registration, RegistrationOutcome,
+    EmailPolicy, LocalAuth, LocalAuthBuilder, LockoutPolicy, Login, MAX_RESET_PASSWORD_TTL,
+    PasswordChangePolicy, Registration, RegistrationOutcome,
 };
