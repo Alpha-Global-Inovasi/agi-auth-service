@@ -1,11 +1,13 @@
 use super::error::LocalError;
-use super::event::{AuthEvent, AuthEventKind, Events, LoginFailure};
-use super::manager::{Clock, SessionManager};
 use super::password::{HashLimits, PasswordHasher, PasswordPolicy};
-use super::session::{Session, SessionContext, SessionState, SessionStore};
-use super::token::SessionToken;
-use super::user::{NewUser, StoreError, User, UserRecord, UserStore};
 use super::validate;
+#[cfg(feature = "mfa")]
+use crate::mfa::SecondFactor;
+use crate::session::event::{AuthEvent, AuthEventKind, Events, LoginFailure};
+use crate::session::manager::{Clock, SessionManager};
+use crate::session::model::{Session, SessionContext, SessionState, SessionStore};
+use crate::session::token::SessionToken;
+use crate::session::user::{NewUser, StoreError, User, UserRecord, UserStore};
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -126,6 +128,11 @@ impl RegistrationOutcome {
 
 /// A successful [`LocalAuth::login`]: the account and its new session.
 ///
+/// When the account has a second factor set up, the session waits for it
+/// ([`mfa_required`](Self::mfa_required)): its token only works for
+/// `Mfa::complete_login` (with the `mfa` feature), which replaces it with the token of an
+/// active session.
+///
 /// This is the only time the session token is available. The `Debug` output does not
 /// contain it.
 #[derive(Debug)]
@@ -139,15 +146,24 @@ pub struct Login {
     pub token: SessionToken,
 }
 
+impl Login {
+    /// `true` when the session is in state [`PendingMfa`](SessionState::PendingMfa):
+    /// the client has to complete the second authentication step before the session
+    /// can be used.
+    pub fn mfa_required(&self) -> bool {
+        self.session.state == SessionState::PendingMfa
+    }
+}
+
 /// Local accounts: registration and login with a username or email address and a
 /// password.
 ///
 /// Cheap to clone; clones share the stores, the session manager and the password hasher.
 ///
 /// ```rust
-/// use rusted_auth::local::{
-///     LocalAuth, MemorySessionStore, MemoryUserStore, Registration, SessionContext,
-///     SessionManager,
+/// use rusted_auth::local::{LocalAuth, Registration};
+/// use rusted_auth::session::{
+///     MemorySessionStore, MemoryUserStore, SessionContext, SessionManager,
 /// };
 /// use std::time::SystemTime;
 ///
@@ -199,6 +215,8 @@ struct Inner<U, S> {
     password_policy: PasswordPolicy,
     reveal_existing_email: bool,
     require_verified_email: bool,
+    #[cfg(feature = "mfa")]
+    second_factor: Option<Arc<dyn SecondFactor>>,
     clock: Clock,
 }
 
@@ -232,10 +250,30 @@ pub struct LocalAuthBuilder<U, S> {
     password_policy: PasswordPolicy,
     reveal_existing_email: bool,
     require_verified_email: bool,
+    #[cfg(feature = "mfa")]
+    second_factor: Option<Arc<dyn SecondFactor>>,
     clock: Clock,
 }
 
 impl<U: UserStore, S: SessionStore> LocalAuthBuilder<U, S> {
+    /// Require the second factors of `mfa` at login: an account with a confirmed TOTP
+    /// authenticator then gets a session in state
+    /// [`PendingMfa`](SessionState::PendingMfa) after a correct password, which
+    /// [`Mfa::complete_login`](crate::mfa::Mfa::complete_login) turns into an active
+    /// session. Accounts without one log in with the password alone, as before.
+    ///
+    /// This is opt-in: without this call, password logins never wait for a second
+    /// factor, even for accounts that have TOTP enabled. Call it whenever the
+    /// application offers TOTP.
+    ///
+    /// `mfa` must use the same session manager as this service. Available with the `mfa`
+    /// feature.
+    #[cfg(feature = "mfa")]
+    pub fn mfa<M: crate::mfa::MfaStore>(mut self, mfa: &crate::mfa::Mfa<M, S>) -> Self {
+        self.second_factor = Some(Arc::new(mfa.clone()));
+        self
+    }
+
     /// Limits on concurrent password hashing. Ignored when a
     /// [`hasher`](Self::hasher) is supplied.
     pub fn hash_limits(mut self, limits: HashLimits) -> Self {
@@ -311,6 +349,8 @@ impl<U: UserStore, S: SessionStore> LocalAuthBuilder<U, S> {
                 password_policy: self.password_policy,
                 reveal_existing_email: self.reveal_existing_email,
                 require_verified_email: self.require_verified_email,
+                #[cfg(feature = "mfa")]
+                second_factor: self.second_factor,
                 clock: self.clock,
             }),
         })
@@ -322,7 +362,7 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
     /// through `sessions`.
     ///
     /// Login events are reported to the event sink of `sessions`
-    /// ([`SessionManagerBuilder::events`](super::SessionManagerBuilder::events)).
+    /// ([`SessionManagerBuilder::events`](crate::session::SessionManagerBuilder::events)).
     pub fn builder(store: U, sessions: SessionManager<S>) -> LocalAuthBuilder<U, S> {
         LocalAuthBuilder {
             store,
@@ -333,6 +373,8 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
             password_policy: PasswordPolicy::default(),
             reveal_existing_email: false,
             require_verified_email: true,
+            #[cfg(feature = "mfa")]
+            second_factor: None,
             clock: Box::new(SystemTime::now),
         }
     }
@@ -443,6 +485,11 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
     /// was known before the login never becomes authenticated by it (session fixation).
     /// Earlier sessions of the account stay valid.
     ///
+    /// When second factors are configured (`LocalAuthBuilder::mfa`, with the `mfa`
+    /// feature) and the account has a confirmed TOTP authenticator, the new session is in
+    /// state [`PendingMfa`](SessionState::PendingMfa) instead and lasts 5 minutes
+    /// ([`Login::mfa_required`]).
+    ///
     /// Every attempt performs exactly one password hash verification, including attempts
     /// for accounts that do not exist, have no password, are locked or are disabled, so
     /// response time does not tell these cases apart. Attempts against a locked account
@@ -532,14 +579,26 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
         self.rehash_if_outdated(now, user.id, password, &hash, &context)
             .await;
 
+        let mfa_required = self.second_factor_required(user.id).await?;
+        let state = if mfa_required {
+            SessionState::PendingMfa
+        } else {
+            SessionState::Active
+        };
         let issued = inner
             .sessions
-            .create(user.id, SessionState::Active, context.clone())
+            .create(user.id, state, context.clone())
             .await?;
-        tracing::debug!(user_id = %user.id, session_id = %issued.session.id, "login succeeded");
+        tracing::debug!(
+            user_id = %user.id,
+            session_id = %issued.session.id,
+            mfa_required,
+            "login succeeded"
+        );
         self.emit(now, Some(user.id), &context, || {
             AuthEventKind::LoginSucceeded {
                 session_id: issued.session.id,
+                mfa_required,
             }
         });
         Ok(Login {
@@ -547,6 +606,16 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
             session: issued.session,
             token: issued.token,
         })
+    }
+
+    /// Whether the account has to complete a second authentication step.
+    async fn second_factor_required(&self, user_id: Uuid) -> Result<bool, LocalError> {
+        #[cfg(feature = "mfa")]
+        if let Some(second_factor) = &self.inner.second_factor {
+            return Ok(second_factor.required_for(user_id).await?);
+        }
+        let _ = user_id;
+        Ok(false)
     }
 
     /// Replace a password hash made with outdated parameters. Never fails the login.
@@ -633,8 +702,8 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::event::testing::Recorder;
-    use crate::local::{MemorySessionStore, MemoryUserStore, SessionError, SessionKind};
+    use crate::session::event::testing::Recorder;
+    use crate::session::{MemorySessionStore, MemoryUserStore, SessionError, SessionKind};
     use std::sync::Mutex;
 
     type TestAuth = LocalAuth<MemoryUserStore, MemorySessionStore>;
@@ -1593,7 +1662,8 @@ mod tests {
         assert_eq!(
             events[1].kind,
             AuthEventKind::LoginSucceeded {
-                session_id: login.session.id
+                session_id: login.session.id,
+                mfa_required: false,
             }
         );
         assert_eq!(events[1].user_id, Some(budi.id));

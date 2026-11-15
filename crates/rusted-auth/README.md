@@ -65,7 +65,10 @@ For Actix-web, use [`rusted-auth-actix`](https://crates.io/crates/rusted-auth-ac
 |---|---|---|
 | `rustls-tls` | yes | Fetch keys over TLS using rustls, verifying certificates against the operating system's trust store |
 | `native-tls` | no | Use the platform TLS library instead |
-| `local` | no | Local accounts: registration and login with argon2id password hashing (`rusted_auth::local`). Unreleased; see the module documentation |
+| `session` | no | Sessions, accounts and the audit hook shared by every way of signing in (`rusted_auth::session`), without password hashing. Unreleased; see the module documentation |
+| `local` | no | Local accounts: registration and login with argon2id password hashing (`rusted_auth::local`). Turns on `session`. Unreleased; see the module documentation |
+| `mfa` | no | Second factor: TOTP authenticators and recovery codes (`rusted_auth::mfa`). Turns on `session` and `encryption`. Unreleased; see the module documentation |
+| `encryption` | no | Encryption of secrets at rest with XChaCha20-Poly1305 and a keyring that supports key rotation (`rusted_auth::encryption`). Unreleased |
 | `test-util` | no | Test helpers for `local`, such as a password hasher with cheap parameters. Never enable it in a production build |
 
 The library never reads environment variables and keeps no global state. It needs a Tokio runtime.

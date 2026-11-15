@@ -17,8 +17,12 @@ rusted-auth = { path = "crates/rusted-auth", version = "0.4.1", default-features
 argon2 = "0.6.0"
 actix-web = { version = "4.19", default-features = false, features = ["macros"] }
 base64 = "0.23.1"
+# AEAD (XChaCha20-Poly1305) for secrets kept at rest, such as TOTP secrets.
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "zeroize"] }
 # Randomness for session tokens.
 getrandom = "0.4.3"
+# HMAC for TOTP codes (RFC 6238). SHA-1 is the algorithm authenticator apps expect.
+hmac = "0.13.0"
 # aws-lc-rs is the crypto backend shared with reqwest's rustls; `use_pem` (default)
 # is only needed by the tests that sign tokens from PEM keys.
 jsonwebtoken = { version = "12", features = ["aws_lc_rs"] }
@@ -27,6 +31,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # Session tokens are stored as SHA-256 hashes and compared in constant time.
 sha2 = "0.11"
+sha1 = { version = "0.11.0", default-features = false }
 subtle = "2.6.1"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["sync"] }

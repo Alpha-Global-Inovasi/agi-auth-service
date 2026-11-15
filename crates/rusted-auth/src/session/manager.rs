@@ -2,7 +2,7 @@
 
 use super::error::SessionError;
 use super::event::{AuthEvent, AuthEventKind, EventSink, Events};
-use super::session::{
+use super::model::{
     LAST_SEEN_WRITE_INTERVAL, MAX_SESSION_CACHE_TTL, NewSession, Session, SessionConfig,
     SessionContext, SessionKind, SessionState, SessionStore, after,
 };
@@ -66,12 +66,12 @@ pub struct AuthenticatedSession {
 /// ([`LAST_SEEN_WRITE_INTERVAL`]).
 ///
 /// ```rust
-/// use rusted_auth::local::{
+/// use rusted_auth::session::{
 ///     MemorySessionStore, MemoryUserStore, SessionContext, SessionManager, SessionState,
 /// };
-/// # use rusted_auth::local::Uuid;
+/// # use rusted_auth::session::Uuid;
 ///
-/// # async fn run(user_id: Uuid) -> Result<(), rusted_auth::local::SessionError> {
+/// # async fn run(user_id: Uuid) -> Result<(), rusted_auth::session::SessionError> {
 /// let users = MemoryUserStore::new();
 /// let sessions = SessionManager::new(MemorySessionStore::new(users));
 ///
@@ -202,6 +202,7 @@ impl<S: SessionStore> SessionManager<S> {
         self.inner.config
     }
 
+    #[cfg_attr(not(feature = "local"), allow(dead_code))]
     pub(crate) fn events(&self) -> &Events {
         &self.inner.events
     }
@@ -210,7 +211,7 @@ impl<S: SessionStore> SessionManager<S> {
     ///
     /// Every call makes a new session with a new random token; an existing session is
     /// never reused or extended. This does not check that the account may sign in: that
-    /// is the caller's job ([`LocalAuth::login`](super::LocalAuth::login) does it).
+    /// is the caller's job (`local::LocalAuth::login` does it).
     ///
     /// An [`Active`](SessionState::Active) session gets the lifetime of its kind. A
     /// [`PendingMfa`](SessionState::PendingMfa) session lasts
@@ -381,36 +382,64 @@ impl<S: SessionStore> SessionManager<S> {
         Ok(AuthenticatedSession { session, user })
     }
 
-    /// Make a session that passed its second authentication step fully authenticated.
+    /// Make a session that passed its second authentication step fully authenticated,
+    /// under a **new token**.
     ///
     /// `session` is the one returned by
-    /// [`validate_pending_mfa`](Self::validate_pending_mfa). It keeps its token and gets
-    /// the lifetime of its kind, with the absolute limit counted from when it was
-    /// created. Fails with [`SessionError::Invalid`] when the session is not waiting for
-    /// that step any more: already active, revoked or expired.
-    pub async fn activate(&self, session: &Session) -> Result<Session, SessionError> {
+    /// [`validate_pending_mfa`](Self::validate_pending_mfa). It is revoked and replaced
+    /// by a new active session with a new identifier and a new token, which is returned
+    /// and must replace the old token at the client (a new cookie, or a new token in the
+    /// response body). The old token stops working at once in this process, so a token
+    /// that leaked during the login is worth nothing once the second step is done.
+    ///
+    /// The new session has the kind, address and `User-Agent` of the pending one. Its
+    /// absolute lifetime is counted from when the **pending** session was created, that
+    /// is from the password check, not from now.
+    ///
+    /// Fails with [`SessionError::Invalid`] when the session is not waiting for that step
+    /// any more: already activated, revoked or expired. Of two concurrent calls for one
+    /// pending session at most one succeeds.
+    pub async fn activate(&self, session: &Session) -> Result<IssuedSession, SessionError> {
         let inner = &self.inner;
         let now = (inner.clock)();
         let (idle_expires_at, absolute_expires_at) =
             inner.active_expiry(session.kind, now, session.created_at);
-        let activated = inner
-            .store
-            .activate(session.id, now, idle_expires_at, absolute_expires_at)
-            .await?;
+        let token = SessionToken::generate()?;
+        let replacement = NewSession {
+            token_hash: token.hash(),
+            user_id: session.user_id,
+            kind: session.kind,
+            state: SessionState::Active,
+            created_at: now,
+            idle_expires_at,
+            absolute_expires_at,
+            ip: session.ip,
+            user_agent: session.user_agent.clone(),
+            idp_sid: session.idp_sid.clone(),
+        };
+        let activated = inner.store.activate(session.id, replacement, now).await;
         inner.evict(|cached| cached.id == session.id);
-        let activated = activated.ok_or(SessionError::Invalid)?;
+        let activated = activated?.ok_or(SessionError::Invalid)?;
 
-        tracing::debug!(session_id = %activated.id, "session activated");
+        tracing::debug!(
+            session_id = %activated.id,
+            previous_session_id = %session.id,
+            "session activated under a new token"
+        );
         inner.events.emit(|| AuthEvent {
             at: now,
             user_id: Some(activated.user_id),
-            ip: None,
-            user_agent: None,
+            ip: activated.ip,
+            user_agent: activated.user_agent.clone(),
             kind: AuthEventKind::SessionActivated {
                 session_id: activated.id,
+                previous_session_id: session.id,
             },
         });
-        Ok(activated)
+        Ok(IssuedSession {
+            token,
+            session: activated,
+        })
     }
 
     /// Revoke one session, for example on logout. Returns `false` when there is no such
@@ -619,9 +648,9 @@ fn judge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::event::testing::Recorder;
-    use crate::local::session::{SessionLifetime, SessionRecord};
-    use crate::local::{MemorySessionStore, MemoryUserStore, NewUser, UserStore};
+    use crate::session::event::testing::Recorder;
+    use crate::session::model::{SessionLifetime, SessionRecord};
+    use crate::session::{MemorySessionStore, MemoryUserStore, NewUser, UserStore};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     const MINUTE: Duration = Duration::from_secs(60);
@@ -697,14 +726,11 @@ mod tests {
 
         async fn activate(
             &self,
-            id: Uuid,
+            pending_id: Uuid,
+            replacement: NewSession,
             now: SystemTime,
-            idle_expires_at: SystemTime,
-            absolute_expires_at: SystemTime,
         ) -> Result<Option<Session>, StoreError> {
-            self.inner
-                .activate(id, now, idle_expires_at, absolute_expires_at)
-                .await
+            self.inner.activate(pending_id, replacement, now).await
         }
 
         async fn revoke(
@@ -1010,12 +1036,11 @@ mod tests {
 
             async fn activate(
                 &self,
-                id: Uuid,
+                pending_id: Uuid,
+                replacement: NewSession,
                 now: SystemTime,
-                a: SystemTime,
-                b: SystemTime,
             ) -> Result<Option<Session>, StoreError> {
-                self.0.activate(id, now, a, b).await
+                self.0.activate(pending_id, replacement, now).await
             }
 
             async fn revoke(
@@ -1602,22 +1627,52 @@ mod tests {
         assert_eq!(f.store.touches(), 0);
         f.recorder.take();
 
-        let activated = f.sessions.activate(&pending.session).await.unwrap();
-        assert_eq!(activated.id, issued.session.id);
+        let rotated = f.sessions.activate(&pending.session).await.unwrap();
+        let activated = rotated.session;
+        assert_ne!(activated.id, issued.session.id);
+        assert_ne!(rotated.token.expose(), token);
+        assert_eq!(activated.user_id, f.budi);
+        assert_eq!(activated.kind, SessionKind::Mobile);
         assert_eq!(activated.state, SessionState::Active);
+        assert_eq!(activated.created_at, f.clock.now());
         assert_eq!(activated.last_seen_at, f.clock.now());
         assert_eq!(activated.idle_expires_at, f.clock.now() + 30 * DAY);
+        // Counted from the pending session, not from the activation.
         assert_eq!(
             activated.absolute_expires_at,
             issued.session.created_at + 90 * DAY
         );
-        assert_eq!(f.recorder.take_names(), ["session_activated"]);
+        let events = f.recorder.take();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].kind,
+            AuthEventKind::SessionActivated {
+                session_id: activated.id,
+                previous_session_id: issued.session.id,
+            }
+        );
 
-        // The same token is now a full session, at once, and no longer a pending one.
-        let authenticated = f.sessions.validate(token).await.unwrap();
+        // The new token is a full session at once; the old one is revoked.
+        let authenticated = f.sessions.validate(rotated.token.expose()).await.unwrap();
         assert_eq!(authenticated.session, activated);
+        let error = f.sessions.validate(token).await.unwrap_err();
+        assert!(matches!(error, SessionError::Revoked));
         let error = f.sessions.validate_pending_mfa(token).await.unwrap_err();
+        assert!(matches!(error, SessionError::Revoked));
+        let error = f
+            .sessions
+            .validate_pending_mfa(rotated.token.expose())
+            .await
+            .unwrap_err();
         assert!(matches!(error, SessionError::Invalid));
+        assert!(
+            f.store
+                .inner
+                .get(issued.session.id)
+                .unwrap()
+                .revoked_at
+                .is_some()
+        );
 
         // Activating twice is refused.
         let error = f.sessions.activate(&pending.session).await.unwrap_err();

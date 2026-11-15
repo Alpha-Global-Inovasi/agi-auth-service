@@ -158,7 +158,7 @@ pub struct SessionRecord {
 /// events.
 ///
 /// ```rust
-/// use rusted_auth::local::SessionContext;
+/// use rusted_auth::session::SessionContext;
 ///
 /// let context = SessionContext::web()
 ///     .ip("203.0.113.7".parse().unwrap())
@@ -334,10 +334,9 @@ pub(crate) fn after(time: SystemTime, duration: Duration) -> SystemTime {
 /// - Only the token hash is stored, in a unique column. The store never sees a token.
 /// - [`find_by_token_hash`](Self::find_by_token_hash) returns the session together with
 ///   its account as it is now, typically with a join.
-/// - A revoked session stays revoked: [`touch`](Self::touch) and
-///   [`activate`](Self::activate) never clear `revoked_at`.
-/// - Each method is atomic. In particular [`activate`](Self::activate) checks and changes
-///   the state in one step.
+/// - A revoked session stays revoked: [`touch`](Self::touch) never clears `revoked_at`.
+/// - Each method is atomic. In particular [`activate`](Self::activate) checks the pending
+///   session, revokes it and inserts its replacement in one transaction.
 pub trait SessionStore: Send + Sync + 'static {
     /// Create a session and return it with its new identifier. `last_seen_at` starts at
     /// `created_at` and `revoked_at` is empty.
@@ -363,18 +362,19 @@ pub trait SessionStore: Send + Sync + 'static {
         idle_expires_at: SystemTime,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
 
-    /// Turn a session that is waiting for its second authentication step into an active
-    /// one, with new expiry times and `last_seen_at = now`.
+    /// Replace a session that passed its second authentication step with a new, active
+    /// session under a new token.
     ///
-    /// Only applies when the session is in state `pending_mfa`, is not revoked and its
-    /// `absolute_expires_at` is later than `now`. Returns the updated session, or `None`
-    /// when it did not apply.
+    /// In one transaction: when the session `pending_id` is in state `pending_mfa`, is not
+    /// revoked and its `absolute_expires_at` is later than `now`, set its `revoked_at` to
+    /// `now` and insert `replacement` as [`insert`](Self::insert) would. Returns the new
+    /// session, or `None`, changing nothing, when the pending session does not qualify.
+    /// Of two concurrent calls for the same pending session, at most one succeeds.
     fn activate(
         &self,
-        id: Uuid,
+        pending_id: Uuid,
+        replacement: NewSession,
         now: SystemTime,
-        idle_expires_at: SystemTime,
-        absolute_expires_at: SystemTime,
     ) -> impl Future<Output = Result<Option<Session>, StoreError>> + Send;
 
     /// Revoke one session by setting `revoked_at`. With `owner`, only when the session

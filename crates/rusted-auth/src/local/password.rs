@@ -1,7 +1,7 @@
 //! Password policy and argon2id hashing with bounded concurrency.
 
 use super::error::LocalError;
-use super::event::{EventSink, Events, HashQueueOutcome};
+use crate::session::event::{EventSink, Events, HashQueueOutcome};
 use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{self, PasswordHasher as _, PasswordVerifier as _};
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -638,7 +638,7 @@ mod tests {
 
     #[tokio::test]
     async fn queue_waits_are_reported() {
-        let recorder = crate::local::event::testing::Recorder::default();
+        let recorder = crate::session::event::testing::Recorder::default();
         let limits = HashLimits::default()
             .max_concurrent(1)
             .max_queued(1)

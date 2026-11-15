@@ -1,4 +1,4 @@
-use super::session::{NewSession, Session, SessionRecord, SessionState, SessionStore};
+use super::model::{NewSession, Session, SessionRecord, SessionState, SessionStore};
 use super::token::SessionTokenHash;
 use super::user::{NewUser, StoreError, User, UserRecord, UserStore};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -170,6 +170,28 @@ struct StoredSession {
     token_hash: SessionTokenHash,
 }
 
+impl From<NewSession> for StoredSession {
+    fn from(new: NewSession) -> Self {
+        Self {
+            session: Session {
+                id: Uuid::new_v4(),
+                user_id: new.user_id,
+                kind: new.kind,
+                state: new.state,
+                created_at: new.created_at,
+                last_seen_at: new.created_at,
+                idle_expires_at: new.idle_expires_at,
+                absolute_expires_at: new.absolute_expires_at,
+                ip: new.ip,
+                user_agent: new.user_agent,
+                revoked_at: None,
+                idp_sid: new.idp_sid,
+            },
+            token_hash: new.token_hash,
+        }
+    }
+}
+
 impl MemorySessionStore {
     /// An empty store for the sessions of the accounts in `users`.
     pub fn new(users: MemoryUserStore) -> Self {
@@ -223,24 +245,9 @@ impl SessionStore for MemorySessionStore {
         if sessions.iter().any(|s| s.token_hash == new.token_hash) {
             return Err(StoreError::backend("duplicate session token hash"));
         }
-        let session = Session {
-            id: Uuid::new_v4(),
-            user_id: new.user_id,
-            kind: new.kind,
-            state: new.state,
-            created_at: new.created_at,
-            last_seen_at: new.created_at,
-            idle_expires_at: new.idle_expires_at,
-            absolute_expires_at: new.absolute_expires_at,
-            ip: new.ip,
-            user_agent: new.user_agent,
-            revoked_at: None,
-            idp_sid: new.idp_sid,
-        };
-        sessions.push(StoredSession {
-            session: session.clone(),
-            token_hash: new.token_hash,
-        });
+        let stored = StoredSession::from(new);
+        let session = stored.session.clone();
+        sessions.push(stored);
         Ok(session)
     }
 
@@ -285,30 +292,38 @@ impl SessionStore for MemorySessionStore {
 
     async fn activate(
         &self,
-        id: Uuid,
+        pending_id: Uuid,
+        replacement: NewSession,
         now: SystemTime,
-        idle_expires_at: SystemTime,
-        absolute_expires_at: SystemTime,
     ) -> Result<Option<Session>, StoreError> {
+        if self.users.get(replacement.user_id).is_none() {
+            return Err(StoreError::NotFound);
+        }
         let mut sessions = self.lock();
-        let Some(session) = sessions
+        if sessions
+            .iter()
+            .any(|s| s.token_hash == replacement.token_hash)
+        {
+            return Err(StoreError::backend("duplicate session token hash"));
+        }
+        let Some(pending) = sessions
             .iter_mut()
             .map(|s| &mut s.session)
-            .find(|s| s.id == id)
+            .find(|s| s.id == pending_id)
         else {
             return Ok(None);
         };
-        if session.state != SessionState::PendingMfa
-            || session.revoked_at.is_some()
-            || session.absolute_expires_at <= now
+        if pending.state != SessionState::PendingMfa
+            || pending.revoked_at.is_some()
+            || pending.absolute_expires_at <= now
         {
             return Ok(None);
         }
-        session.state = SessionState::Active;
-        session.last_seen_at = now;
-        session.idle_expires_at = idle_expires_at;
-        session.absolute_expires_at = absolute_expires_at;
-        Ok(Some(session.clone()))
+        pending.revoked_at = Some(now);
+        let stored = StoredSession::from(replacement);
+        let session = stored.session.clone();
+        sessions.push(stored);
+        Ok(Some(session))
     }
 
     async fn revoke(

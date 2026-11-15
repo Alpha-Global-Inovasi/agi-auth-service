@@ -4,7 +4,7 @@ description = "Framework-agnostic authentication core for Rust services: multi-i
 readme = "README.md"
 keywords = ["auth", "jwt", "oidc", "jwks", "firebase"]
 categories = ["authentication", "web-programming"]
-include = ["src/*.rs", "src/local/*.rs", "README.md", "LICENSE-MIT", "LICENSE-APACHE"]
+include = ["src/*.rs", "src/encryption/*.rs", "src/local/*.rs", "src/mfa/*.rs", "src/session/*.rs", "README.md", "LICENSE-MIT", "LICENSE-APACHE"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,16 +18,16 @@ default = ["rustls-tls"]
 # TLS backend for fetching discovery and JWKS documents. Enable exactly one.
 rustls-tls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
-# Local accounts: password hashing (argon2id), registration, login and sessions.
-local = [
-    "dep:argon2",
-    "dep:getrandom",
-    "dep:sha2",
-    "dep:subtle",
-    "dep:unicode-normalization",
-    "dep:uuid",
-    "dep:zeroize",
-]
+# Sessions, accounts and the audit hook, shared by every way of signing in. Pulls in no
+# password hashing.
+session = ["dep:getrandom", "dep:sha2", "dep:subtle", "dep:uuid", "dep:zeroize"]
+# Local accounts: password hashing (argon2id), registration and login. Builds on `session`.
+local = ["session", "dep:argon2", "dep:unicode-normalization"]
+# Encryption of secrets at rest with a keyring that supports key rotation.
+encryption = ["dep:chacha20poly1305", "dep:getrandom", "dep:hmac", "dep:sha2", "dep:zeroize"]
+# Second factor: TOTP (RFC 6238) and recovery codes. Builds on `session` and `encryption`;
+# together with `local`, logins of accounts with TOTP wait for the second factor.
+mfa = ["session", "encryption", "dep:hmac", "dep:sha1"]
 # Test helpers for `local`, such as a password hasher with cheap parameters.
 # Never enable this in a production build.
 test-util = ["local"]
@@ -35,11 +35,14 @@ test-util = ["local"]
 [dependencies]
 argon2 = { workspace = true, optional = true }
 base64 = { workspace = true }
+chacha20poly1305 = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha1 = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 subtle = { workspace = true, optional = true }
 thiserror = { workspace = true }
@@ -50,7 +53,7 @@ uuid = { workspace = true, optional = true }
 zeroize = { workspace = true, optional = true }
 
 [package.metadata.docs.rs]
-features = ["local"]
+features = ["local", "mfa"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "time"] }

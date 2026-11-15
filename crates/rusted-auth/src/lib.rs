@@ -45,6 +45,8 @@ compile_error!(
 
 mod algorithm;
 mod bearer;
+#[cfg(feature = "encryption")]
+pub mod encryption;
 mod error;
 pub mod firebase;
 mod http;
@@ -52,7 +54,11 @@ mod issuer;
 mod jwks;
 #[cfg(feature = "local")]
 pub mod local;
+#[cfg(feature = "mfa")]
+pub mod mfa;
 mod principal;
+#[cfg(feature = "session")]
+pub mod session;
 mod verifier;
 
 #[cfg(test)]
