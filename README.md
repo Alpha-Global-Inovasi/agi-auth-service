@@ -6,24 +6,32 @@ This repository is a Cargo workspace:
 
 | Crate | What it is |
 |---|---|
-| [`rusted-auth`](crates/rusted-auth) | Framework-agnostic core: verifies tokens from any OpenID Connect / JWT issuer |
-| [`rusted-auth-actix`](crates/rusted-auth-actix) | Actix-web middleware and extractors |
-| [`rusted-auth-sea-orm`](crates/rusted-auth-sea-orm) | Postgres storage with SeaORM for accounts, sessions and second factors (unreleased, part of 0.5) |
+| [`rusted-auth`](crates/rusted-auth) | Framework-agnostic core: token verification for any OpenID Connect / JWT issuer, and (behind features) local accounts, sessions and a second factor |
+| [`rusted-auth-actix`](crates/rusted-auth-actix) | Actix-web middleware, extractors, session cookies with CSRF protection, and the HTTP routes |
+| [`rusted-auth-sea-orm`](crates/rusted-auth-sea-orm) | Postgres storage with SeaORM for accounts, sessions, second factors and the audit log |
 
 Formerly published as `agi-auth` (0.4.0) and, before that, `cf-auth` (Firebase only). See the [changelog](CHANGELOG.md) for how to migrate.
 
 ## Status
 
-Version 0.4 covers **token verification**: the application receives a bearer token issued by an identity provider (Firebase, Keycloak, Zitadel, Auth0, Microsoft Entra ID, ...) and gets back a normalized `Principal`.
+Version 0.5 covers:
 
-Local login, sessions, MFA and single sign-on modes are planned for later releases.
+- **Token verification**: the application receives a bearer token issued by an identity provider (Firebase, Keycloak, Zitadel, Auth0, Microsoft Entra ID, ...) and gets back a normalized `Principal`.
+- **Local accounts** (`local` feature): registration, password login with argon2id, lockout, email verification, password reset and change.
+- **Sessions** (`session` feature): opaque `rusted_s_` tokens in a `__Host-` cookie for browsers or a bearer header for mobile apps, revocable at any time.
+- **Second factor** (`mfa` feature): TOTP authenticators and recovery codes, with secrets encrypted under a rotatable keyring.
+- **HTTP routes** for Actix-web with CSRF protection and per-address rate limits, and **Postgres storage** with migrations.
+
+Single sign-on modes are planned for later releases.
+
+Upgrading from 0.4: see [Migrating to 0.5](docs/migrating-to-0.5.md). Before going to production with local accounts, read the [security notes](docs/security.md), [key rotation](docs/key-rotation.md) and [secret scanning](docs/secret-scanning.md).
 
 ## Quick start
 
 ```toml
 [dependencies]
-rusted-auth = "0.4"
-rusted-auth-actix = "0.4"
+rusted-auth = "0.5"
+rusted-auth-actix = "0.5"
 ```
 
 ```rust
@@ -61,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **Standard claim checks:** `iss`, `aud`, `exp`, `nbf`, a non-empty `sub`, and `auth_time` not in the future.
 - **Key fetching is bounded:** HTTPS only, 10 second timeout, 1 MiB response cap, redirects only to HTTPS, and at most one fetch per minute per issuer no matter what tokens arrive.
 - **Error responses carry no internal details.** The full error goes to the log.
+- **Local accounts** do not reveal which addresses are registered, lock after repeated failures, keep only hashes of tokens, and rotate the session token after the second factor. See the [security notes](docs/security.md) for the details and the known limits.
 - `#![forbid(unsafe_code)]` across the workspace.
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).

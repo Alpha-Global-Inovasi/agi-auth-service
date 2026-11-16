@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/rusted-auth", "crates/rusted-auth-actix", "crates/rusted-auth-sea-orm"]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
@@ -12,7 +12,7 @@ repository = "https://github.com/Alpha-Global-Inovasi/rusted-auth"
 homepage = "https://github.com/Alpha-Global-Inovasi/rusted-auth"
 
 [workspace.dependencies]
-rusted-auth = { path = "crates/rusted-auth", version = "0.4.1", default-features = false }
+rusted-auth = { path = "crates/rusted-auth", version = "0.5.0", default-features = false }
 # Password hashing for the `local` feature of rusted-auth.
 argon2 = "0.6.0"
 actix-web = { version = "4.19", default-features = false, features = ["macros"] }
