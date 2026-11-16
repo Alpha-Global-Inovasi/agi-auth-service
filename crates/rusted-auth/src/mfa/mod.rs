@@ -90,6 +90,8 @@
 //!
 //! [`AttemptStore`]: crate::session::AttemptStore
 
+#[cfg(any(test, feature = "test-util"))]
+pub mod conformance;
 mod error;
 mod memory;
 mod recovery;

@@ -28,8 +28,8 @@ encryption = ["dep:chacha20poly1305", "dep:getrandom", "dep:hmac", "dep:sha2", "
 # Second factor: TOTP (RFC 6238) and recovery codes. Builds on `session` and `encryption`;
 # together with `local`, logins of accounts with TOTP wait for the second factor.
 mfa = ["session", "encryption", "dep:hmac", "dep:sha1"]
-# Test helpers for `local`, such as a password hasher with cheap parameters.
-# Never enable this in a production build.
+# Test helpers for `local`, such as a password hasher with cheap parameters, and
+# conformance checks for storage implementations. Never enable this in a production build.
 test-util = ["local"]
 
 [dependencies]

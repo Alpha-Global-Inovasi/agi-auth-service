@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/rusted-auth", "crates/rusted-auth-actix"]
+members = ["crates/rusted-auth", "crates/rusted-auth-actix", "crates/rusted-auth-sea-orm"]
 
 [workspace.package]
 version = "0.4.1"
@@ -17,6 +17,8 @@ rusted-auth = { path = "crates/rusted-auth", version = "0.4.1", default-features
 argon2 = "0.6.0"
 actix-web = { version = "4.19", default-features = false, features = ["macros"] }
 base64 = "0.23.1"
+# Timestamps for the SeaORM storage crate; only the conversion from `SystemTime` is used.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 # AEAD (XChaCha20-Poly1305) for secrets kept at rest, such as TOTP secrets.
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "zeroize"] }
 # Randomness for session tokens.
@@ -27,6 +29,10 @@ hmac = "0.13.0"
 # is only needed by the tests that sign tokens from PEM keys.
 jsonwebtoken = { version = "12", features = ["aws_lc_rs"] }
 reqwest = { version = "0.13.5", default-features = false }
+# Postgres storage in rusted-auth-sea-orm. No TLS backend is chosen here: the application
+# enables one on its own `sea-orm` dependency.
+sea-orm = { version = "2.0.4", default-features = false, features = ["sqlx-postgres", "runtime-tokio", "with-chrono", "with-json", "with-uuid"] }
+sea-orm-migration = { version = "2.0.4", default-features = false, features = ["sqlx-postgres", "runtime-tokio"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # Session tokens are stored as SHA-256 hashes and compared in constant time.

@@ -8,6 +8,7 @@ This repository is a Cargo workspace:
 |---|---|
 | [`rusted-auth`](crates/rusted-auth) | Framework-agnostic core: verifies tokens from any OpenID Connect / JWT issuer |
 | [`rusted-auth-actix`](crates/rusted-auth-actix) | Actix-web middleware and extractors |
+| [`rusted-auth-sea-orm`](crates/rusted-auth-sea-orm) | Postgres storage with SeaORM for accounts, sessions and second factors (unreleased, part of 0.5) |
 
 Formerly published as `agi-auth` (0.4.0) and, before that, `cf-auth` (Firebase only). See the [changelog](CHANGELOG.md) for how to migrate.
 
@@ -71,9 +72,12 @@ cargo test --workspace                  # offline; tokens are signed with the ke
 cargo test --workspace -- --ignored     # also contacts Google's real key endpoint
 cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check                        # licenses and advisories (needs cargo-deny)
+# Postgres storage tests run when a database is given:
+RUSTED_AUTH_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres \
+  cargo test -p rusted-auth-sea-orm --all-features
 ```
 
-Minimum supported Rust version: 1.89. Raising it is a minor-version change.
+Minimum supported Rust version: 1.89 (1.94 for `rusted-auth-sea-orm`, which SeaORM 2.0 requires). Raising it is a minor-version change.
 
 ## License
 
