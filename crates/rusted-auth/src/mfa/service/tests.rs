@@ -470,6 +470,96 @@ async fn too_many_wrong_codes_cancel_the_login() {
 }
 
 #[tokio::test]
+async fn wrong_codes_are_limited_per_account_across_logins() {
+    let window = Duration::from_secs(3600);
+    let f = Fixture::with(
+        MfaConfig::default()
+            .max_attempts(2)
+            .max_account_attempts(3, window),
+    )
+    .await;
+    f.enable().await;
+    let wrong = f.wrong().await;
+
+    // Two logins with wrong codes use up the account's three attempts.
+    let first = f.pending().await;
+    for _ in 0..2 {
+        f.mfa
+            .complete_login(first.token.expose(), &wrong)
+            .await
+            .unwrap_err();
+    }
+    let second = f.pending().await;
+    let error = f
+        .mfa
+        .complete_login(second.token.expose(), &wrong)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, MfaError::InvalidCode));
+    f.recorder.take();
+
+    // From now on even the right code is refused, and the login is cancelled.
+    let error = f
+        .mfa
+        .complete_login(second.token.expose(), &f.code(0))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, MfaError::TooManyAttempts));
+    let names: Vec<_> = f.recorder.take().iter().map(|e| e.kind.name()).collect();
+    assert_eq!(names, ["mfa_attempts_exceeded", "session_revoked"]);
+    assert!(
+        f.sessions
+            .validate_pending_mfa(second.token.expose())
+            .await
+            .is_err()
+    );
+    let third = f.pending().await;
+    assert!(matches!(
+        f.mfa
+            .complete_login(third.token.expose(), &f.code(0))
+            .await
+            .unwrap_err(),
+        MfaError::TooManyAttempts
+    ));
+
+    // After the window a correct code works and clears the count.
+    f.clock.advance(window);
+    let fourth = f.pending().await;
+    f.mfa
+        .complete_login(fourth.token.expose(), &wrong)
+        .await
+        .unwrap_err();
+    f.mfa
+        .complete_login(fourth.token.expose(), &f.code(0))
+        .await
+        .unwrap();
+    f.clock.advance(STEP);
+    for _ in 0..2 {
+        let next = f.pending().await;
+        f.mfa
+            .complete_login(next.token.expose(), &wrong)
+            .await
+            .unwrap_err();
+    }
+    let last = f.pending().await;
+    f.mfa
+        .complete_login(last.token.expose(), &f.code(0))
+        .await
+        .expect("the earlier success started a new count");
+
+    assert!(matches!(
+        Mfa::builder(
+            MemoryMfaStore::new(),
+            Keyring::new("k", key(1)).unwrap(),
+            f.sessions.clone()
+        )
+        .config(MfaConfig::default().max_account_attempts(0, window))
+        .build(),
+        Err(MfaError::Config(_))
+    ));
+}
+
+#[tokio::test]
 async fn the_attempt_limit_is_configurable() {
     let f = Fixture::with(MfaConfig::default().max_attempts(1)).await;
     f.enable().await;

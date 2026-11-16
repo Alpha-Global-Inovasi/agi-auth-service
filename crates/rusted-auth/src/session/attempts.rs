@@ -17,6 +17,9 @@ const PRUNE_AT: usize = 1024;
 pub enum AttemptScope {
     /// Codes for the second step of one login. The key is the pending session.
     Login,
+    /// Wrong codes for the second step of login across all logins of an account. The
+    /// key is the account.
+    LoginAccount,
     /// Codes that confirm a change to an account's second factor. The key is the
     /// account.
     Change,
@@ -31,11 +34,12 @@ pub enum AttemptScope {
 }
 
 impl AttemptScope {
-    /// The name to store: `login`, `change`, `email`, `password_change` or
-    /// `client_address`.
+    /// The name to store: `login`, `login_account`, `change`, `email`,
+    /// `password_change` or `client_address`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Login => "login",
+            Self::LoginAccount => "login_account",
             Self::Change => "change",
             Self::Email => "email",
             Self::PasswordChange => "password_change",
@@ -302,6 +306,7 @@ mod tests {
             None
         );
         assert_eq!(AttemptScope::Login.as_str(), "login");
+        assert_eq!(AttemptScope::LoginAccount.as_str(), "login_account");
         assert_eq!(scope.as_str(), "change");
         assert_eq!(AttemptScope::Email.as_str(), "email");
         assert_eq!(AttemptScope::PasswordChange.as_str(), "password_change");

@@ -11,6 +11,7 @@ use crate::encryption::Keyring;
 use crate::session::attempts::{AttemptScope, AttemptStore, DynAttemptStore, MemoryAttemptStore};
 use crate::session::event::{AuthEvent, AuthEventKind, Events, MfaFailure, MfaMethod};
 use crate::session::manager::Clock;
+use crate::session::model::after;
 use crate::session::{AuthenticatedSession, Session, SessionManager, SessionStore, User};
 use std::fmt;
 use std::sync::Arc;
@@ -56,7 +57,8 @@ fn secret_context(user_id: Uuid) -> Vec<u8> {
 /// | Recovery codes per set | 10 |
 /// | Digits per recovery code | 6 |
 /// | Wrong codes per login before it is cancelled | 5 |
-/// | Wrong codes for changes, per account in 5 minutes | the same number |
+/// | Wrong login codes per account, across logins, in 1 hour | 20 |
+/// | Wrong codes for changes, per account in 5 minutes | the same number as per login |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MfaConfig {
@@ -74,6 +76,16 @@ pub struct MfaConfig {
     /// [`Mfa::disable_totp`] and [`Mfa::regenerate_recovery_codes`] for 5 minutes. At
     /// least 1.
     pub max_attempts: u32,
+    /// Wrong second-step codes accepted per account across all its logins within
+    /// [`account_attempt_window`](Self::account_attempt_window). Someone who knows the
+    /// password can start a new login after every [`max_attempts`](Self::max_attempts)
+    /// wrong codes; this bounds how many codes they can try in total. When it is
+    /// reached, the second step fails with [`MfaError::TooManyAttempts`] until the
+    /// window ends, and a correct code clears the count. At least 1.
+    pub max_account_attempts: u32,
+    /// The window of [`max_account_attempts`](Self::max_account_attempts). It starts
+    /// with the first wrong code after the previous window ended.
+    pub account_attempt_window: Duration,
 }
 
 impl Default for MfaConfig {
@@ -83,6 +95,8 @@ impl Default for MfaConfig {
             recovery_codes: 10,
             recovery_code_digits: 6,
             max_attempts: 5,
+            max_account_attempts: 20,
+            account_attempt_window: Duration::from_secs(60 * 60),
         }
     }
 }
@@ -112,6 +126,14 @@ impl MfaConfig {
         self
     }
 
+    /// Set [`max_account_attempts`](Self::max_account_attempts) and
+    /// [`account_attempt_window`](Self::account_attempt_window).
+    pub fn max_account_attempts(mut self, attempts: u32, window: Duration) -> Self {
+        self.max_account_attempts = attempts;
+        self.account_attempt_window = window;
+        self
+    }
+
     fn check(&self) -> Result<(), MfaError> {
         self.totp.check().map_err(MfaError::Config)?;
         if !(1..=MAX_RECOVERY_CODES).contains(&self.recovery_codes) {
@@ -129,9 +151,14 @@ impl MfaConfig {
                 self.recovery_code_digits
             )));
         }
-        if self.max_attempts == 0 {
+        if self.max_attempts == 0 || self.max_account_attempts == 0 {
             return Err(MfaError::Config(
                 "at least one attempt must be allowed".into(),
+            ));
+        }
+        if self.account_attempt_window.is_zero() {
+            return Err(MfaError::Config(
+                "the window of the attempts per account must not be empty".into(),
             ));
         }
         Ok(())
@@ -549,7 +576,11 @@ impl<M: MfaStore, S: SessionStore> Mfa<M, S> {
     /// Each wrong code counts against the pending session. After
     /// [`MfaConfig::max_attempts`] wrong codes the session is revoked and this fails with
     /// [`MfaError::TooManyAttempts`]: the user has to log in with the password again.
-    /// The counters live in the [`AttemptStore`] given to
+    /// Wrong codes also count against the account across its logins
+    /// ([`MfaConfig::max_account_attempts`], 20 per hour by default), so knowing the
+    /// password does not buy unlimited guesses by logging in again and again; at that
+    /// limit every second step of the account fails the same way until the window
+    /// ends. The counters live in the [`AttemptStore`] given to
     /// [`MfaBuilder::attempts`]; the default keeps them in this process.
     ///
     /// # Errors
@@ -572,6 +603,11 @@ impl<M: MfaStore, S: SessionStore> Mfa<M, S> {
         let attempt = self
             .begin_attempt(scope, session.id, session.absolute_expires_at, now)
             .await?;
+        if let Err(error) = self.begin_account_attempt(now, &session, &user).await {
+            self.end_attempt(scope, session.id, false).await;
+            return Err(error);
+        }
+        let account = AttemptScope::LoginAccount;
 
         let verified = match self.verify_code(user.id, code, now).await {
             Ok(Ok(verified)) => verified,
@@ -581,8 +617,9 @@ impl<M: MfaStore, S: SessionStore> Mfa<M, S> {
                     .await);
             }
             Err(error) => {
-                // Not the user's fault: give the attempt back.
+                // Not the user's fault: give the attempts back.
                 self.end_attempt(scope, session.id, false).await;
+                self.end_attempt(account, user.id, false).await;
                 return Err(error);
             }
         };
@@ -594,6 +631,7 @@ impl<M: MfaStore, S: SessionStore> Mfa<M, S> {
             Ok(issued) => issued,
             Err(error) => {
                 self.end_attempt(scope, session.id, false).await;
+                self.end_attempt(account, user.id, false).await;
                 return Err(error.into());
             }
         };
@@ -626,6 +664,8 @@ impl<M: MfaStore, S: SessionStore> Mfa<M, S> {
             );
             return Err(MfaError::InvalidCode);
         }
+        // A correct code ends the series of wrong ones.
+        self.end_attempt(account, user.id, true).await;
         if let Verified::Totp { record, secret, .. } = &verified {
             self.reencrypt_if_needed(record, secret).await;
         }
@@ -709,6 +749,53 @@ impl<M: MfaStore, S: SessionStore> Mfa<M, S> {
         self.end_attempt(AttemptScope::Login, session.id, true)
             .await;
         MfaError::TooManyAttempts
+    }
+
+    /// Count a second-step code against the account, across its logins. At the limit
+    /// the pending session is revoked and the login fails like one with too many wrong
+    /// codes.
+    async fn begin_account_attempt(
+        &self,
+        now: SystemTime,
+        session: &Session,
+        user: &User,
+    ) -> Result<(), MfaError> {
+        let inner = &self.inner;
+        let config = &inner.config;
+        let counted = inner
+            .attempts
+            .dyn_begin(
+                AttemptScope::LoginAccount,
+                user.id,
+                config.max_account_attempts,
+                after(now, config.account_attempt_window),
+                now,
+            )
+            .await?;
+        if counted.is_some() {
+            return Ok(());
+        }
+        tracing::warn!(
+            session_id = %session.id,
+            user_id = %user.id,
+            "too many wrong second-step codes for the account; login cancelled"
+        );
+        self.emit(
+            now,
+            user.id,
+            Some(session),
+            AuthEventKind::MfaAttemptsExceeded {
+                session_id: Some(session.id),
+                attempts: config.max_account_attempts,
+            },
+        );
+        if let Err(error) = inner.sessions.revoke(session.id).await {
+            tracing::warn!(session_id = %session.id, %error, "could not revoke session after too many attempts");
+            return Err(error.into());
+        }
+        self.end_attempt(AttemptScope::Login, session.id, true)
+            .await;
+        Err(MfaError::TooManyAttempts)
     }
 
     /// Check and use up a code that confirms a change to the account's second factor.

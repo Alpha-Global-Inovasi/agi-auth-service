@@ -71,6 +71,7 @@
 //! | Recovery codes | 10 per set | [`MfaConfig::recovery_codes`] |
 //! | Recovery code length | 6 digits (6 to 12) | [`MfaConfig::recovery_code_digits`] |
 //! | Wrong codes per login, and per account for changes in 5 minutes | 5 | [`MfaConfig::max_attempts`] |
+//! | Wrong login codes per account across logins, in 1 hour | 20 | [`MfaConfig::max_account_attempts`] |
 //!
 //! # What the caller still has to do
 //!

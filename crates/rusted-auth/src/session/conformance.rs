@@ -979,6 +979,7 @@ pub async fn attempt_store<A: AttemptStore>(attempts: &A) {
 
     // Scopes and keys are separate.
     for scope in [
+        AttemptScope::LoginAccount,
         AttemptScope::Change,
         AttemptScope::Email,
         AttemptScope::PasswordChange,
