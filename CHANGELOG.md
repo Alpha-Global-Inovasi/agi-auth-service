@@ -7,6 +7,13 @@ may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-17
+
+Local accounts, sessions, a second factor, Postgres storage and HTTP routes. See
+[Migrating to 0.5](docs/migrating-to-0.5.md); before going to production, read the
+[security notes](docs/security.md), [key rotation](docs/key-rotation.md) and
+[secret scanning](docs/secret-scanning.md).
+
 ### Added
 
 - `local` cargo feature (off by default) with the `rusted_auth::local` module: accounts
@@ -185,13 +192,46 @@ may contain breaking changes.
   the OpenAPI paths and schemas of the routes for utoipa 6.
 - `AttemptScope::ClientAddress`, and `LocalAuth::second_factor_enabled` and
   `LocalAuth::reveals_existing_email`.
+- Wrong second-step codes are also limited per account across logins
+  (`MfaConfig::max_account_attempts`, 20 per hour by default, `AttemptScope::LoginAccount`),
+  so knowing the password does not allow unlimited guesses by logging in again after
+  every 5 wrong codes. A correct code clears the count.
+- `rusted-auth-actix`: `openapi::UsernameAvailableApi` and `AuthRoutes::openapi`, the
+  OpenAPI document of exactly the mounted routes.
+- Documentation: [migration guide](docs/migrating-to-0.5.md),
+  [security notes](docs/security.md), [key rotation](docs/key-rotation.md) and
+  [secret scanning patterns](docs/secret-scanning.md) for GitHub and gitleaks
+  ([`docs/gitleaks.toml`](docs/gitleaks.toml)).
 
 ### Changed
 
 - `rusted-auth-actix`: `AuthResponder::respond` takes an `AuthFailure` (status, stable
-  `code`, public message, field errors) instead of an `AuthError`. The default
-  `ProblemResponder` writes RFC 9457 problem details (`application/problem+json`);
-  `JsonResponder` is removed.
+  `code`, public message, field errors) instead of an `AuthError`, and
+  `AuthResponder::status_for` is removed. The default `ProblemResponder` writes RFC 9457
+  problem details (`application/problem+json`); `JsonResponder` is removed.
+- `rusted-auth-actix`: `openapi::AuthApi` no longer lists `GET /username-available`,
+  which is only mounted when registration reveals existing addresses; its `username`
+  parameter is described as a query parameter, and every response has a description.
+- `rusted-auth-sea-orm` is published, with the same version as the other crates.
+
+### Security
+
+- Login reads the account again after the password check, and decides on that read.
+  Before, guesses sent in parallel were judged against the account as it was before
+  they waited for the hasher, so a burst could try many more passwords than the
+  lockout allows and could extend a lock already in place; a password replaced by a
+  concurrent reset could also still log in once.
+
+### Migrating from 0.4
+
+- `AuthResponder` implementations take `&AuthFailure`: use `failure.status()`,
+  `failure.code()` and `failure.public_message()`.
+- Clients that parsed `{"status": false, "message": ...}` from 401 answers now get
+  problem details, or keep the old body with a responder of their own.
+- Code that only verifies tokens needs no other change. The new features are opt-in.
+
+Details, including changes for pre-releases of 0.5 used from git, are in
+[docs/migrating-to-0.5.md](docs/migrating-to-0.5.md).
 
 ## [0.4.1] - 2026-11-15
 
