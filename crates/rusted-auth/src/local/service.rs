@@ -687,6 +687,12 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
     /// response time does not tell these cases apart. Attempts against a locked account
     /// are rejected even with the right password and do not extend the lock.
     ///
+    /// The account is read again after the hash check, and that second read decides:
+    /// a lock, a disabled account or a new password stored while the request waited
+    /// for the hasher applies to it. Concurrent guesses therefore cannot slip past a
+    /// lock that earlier guesses set. Accounts that do not exist are looked up twice
+    /// as well.
+    ///
     /// # Outdated password hashes
     ///
     /// When the stored hash was made with other parameters than the hasher uses now, a
@@ -710,13 +716,16 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
     ) -> Result<Login, LocalError> {
         let inner = &self.inner;
         let context = context.normalized();
-        let record = self.find(identifier.trim()).await?;
+        let identifier = identifier.trim();
+        let record = self.find(identifier).await?;
 
         let Some((record, hash)) = record.and_then(|r| {
             let hash = r.password_hash.clone()?;
             Some((r, hash))
         }) else {
             inner.hasher.verify_dummy(password).await?;
+            // The same second lookup as for an existing account, below.
+            self.find(identifier).await?;
             tracing::debug!("login rejected: no such account or no password set");
             let now = (inner.clock)();
             self.login_failed(now, None, &context, LoginFailure::UnknownAccount);
@@ -724,6 +733,30 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
         };
 
         let password_matches = inner.hasher.verify(password, &hash).await?;
+        // Read the account again: the first read can be up to `HashLimits::max_wait`
+        // old by now. Concurrent guesses that queued for the hasher before the account
+        // locked would otherwise all be judged against the unlocked state, so a burst
+        // of requests could try far more passwords than the lockout allows, and could
+        // extend a lock that is already in place.
+        let fresh = self
+            .find(identifier)
+            .await?
+            .filter(|fresh| fresh.user.id == record.user.id);
+        let Some(record) = fresh else {
+            tracing::debug!(user_id = %record.user.id, "login rejected: account changed during login");
+            let now = (inner.clock)();
+            self.login_failed(
+                now,
+                Some(record.user.id),
+                &context,
+                LoginFailure::UnknownAccount,
+            );
+            return Err(LocalError::InvalidCredentials);
+        };
+        // A password reset or change while the hash was checked replaced it: the
+        // password that matched is no longer the account's.
+        let password_matches =
+            password_matches && record.password_hash.as_deref() == Some(hash.as_str());
         let user = record.user;
         let now = (inner.clock)();
 
@@ -1595,6 +1628,182 @@ mod tests {
             recorder.take_names(),
             ["session_created", "login_succeeded"]
         );
+    }
+
+    /// A user store that changes the account right after the first lookup, as a
+    /// concurrent request would while this one waits for the hasher.
+    #[derive(Clone)]
+    struct ChangesAfterFirstRead {
+        users: MemoryUserStore,
+        reads: Arc<std::sync::atomic::AtomicUsize>,
+        change: Arc<dyn Fn(&mut UserRecord) + Send + Sync>,
+    }
+
+    impl ChangesAfterFirstRead {
+        fn after_first_read(&self, found: &Option<UserRecord>) {
+            use std::sync::atomic::Ordering;
+            if self.reads.fetch_add(1, Ordering::SeqCst) == 0
+                && let Some(record) = found
+            {
+                let change = Arc::clone(&self.change);
+                self.users.update(record.user.id, move |r| change(r));
+            }
+        }
+    }
+
+    impl UserStore for ChangesAfterFirstRead {
+        async fn find_by_username(&self, username: &str) -> Result<Option<UserRecord>, StoreError> {
+            let found = self.users.find_by_username(username).await?;
+            self.after_first_read(&found);
+            Ok(found)
+        }
+
+        async fn find_by_email(&self, email: &str) -> Result<Option<UserRecord>, StoreError> {
+            let found = self.users.find_by_email(email).await?;
+            self.after_first_read(&found);
+            Ok(found)
+        }
+
+        async fn insert(&self, user: NewUser) -> Result<User, StoreError> {
+            self.users.insert(user).await
+        }
+
+        async fn record_failed_login(&self, id: Uuid) -> Result<u32, StoreError> {
+            self.users.record_failed_login(id).await
+        }
+
+        async fn set_locked_until(
+            &self,
+            id: Uuid,
+            until: Option<SystemTime>,
+        ) -> Result<(), StoreError> {
+            self.users.set_locked_until(id, until).await
+        }
+
+        async fn record_successful_login(&self, id: Uuid) -> Result<(), StoreError> {
+            self.users.record_successful_login(id).await
+        }
+
+        async fn mark_email_verified(&self, id: Uuid, at: SystemTime) -> Result<bool, StoreError> {
+            self.users.mark_email_verified(id, at).await
+        }
+
+        async fn reset_password(&self, id: Uuid, hash: String) -> Result<(), StoreError> {
+            self.users.reset_password(id, hash).await
+        }
+
+        async fn replace_password_hash(
+            &self,
+            id: Uuid,
+            current: &str,
+            new: String,
+        ) -> Result<bool, StoreError> {
+            self.users.replace_password_hash(id, current, new).await
+        }
+    }
+
+    /// Log in once against an account that `change` alters while the password is
+    /// being checked.
+    async fn login_while_account_changes(
+        change: impl Fn(&mut UserRecord) + Send + Sync + 'static,
+    ) -> (Result<Login, LocalError>, UserRecord) {
+        let users = MemoryUserStore::new();
+        let sessions = SessionManager::new(MemorySessionStore::new(users.clone()));
+        let registered = LocalAuth::builder(users.clone(), sessions.clone())
+            .mailer(crate::local::NoMailer)
+            .tokens(crate::session::MemoryOneTimeTokenStore::new())
+            .hasher(PasswordHasher::insecure_for_tests(HashLimits::default()).unwrap())
+            .require_verified_email(false)
+            .build()
+            .unwrap()
+            .register(registration("budi", "budi@example.com"))
+            .await
+            .unwrap();
+        let id = registered.created().unwrap().id;
+        let store = ChangesAfterFirstRead {
+            users: users.clone(),
+            reads: Arc::default(),
+            change: Arc::new(change),
+        };
+        let auth = LocalAuth::builder(store, sessions)
+            .mailer(crate::local::NoMailer)
+            .tokens(crate::session::MemoryOneTimeTokenStore::new())
+            .hasher(PasswordHasher::insecure_for_tests(HashLimits::default()).unwrap())
+            .require_verified_email(false)
+            .build()
+            .unwrap();
+        let result = auth.login("budi", PASSWORD, SessionContext::web()).await;
+        (result, users.get(id).unwrap())
+    }
+
+    #[tokio::test]
+    async fn lock_set_while_the_password_is_checked_is_respected() {
+        // Concurrent wrong guesses locked the account after this login read it.
+        let until = SystemTime::now() + Duration::from_secs(3600);
+        let (result, record) = login_while_account_changes(move |r| {
+            r.failed_login_count = 5;
+            r.locked_until = Some(until);
+        })
+        .await;
+        assert!(matches!(result, Err(LocalError::AccountLocked { .. })));
+        assert_eq!(record.failed_login_count, 5, "not counted while locked");
+        assert_eq!(record.locked_until, Some(until), "lock not extended");
+    }
+
+    #[tokio::test]
+    async fn wrong_password_during_a_lock_does_not_extend_it() {
+        let users = MemoryUserStore::new();
+        let sessions = SessionManager::new(MemorySessionStore::new(users.clone()));
+        let until = SystemTime::now() + Duration::from_secs(60);
+        let store = ChangesAfterFirstRead {
+            users: users.clone(),
+            reads: Arc::default(),
+            change: Arc::new(move |r: &mut UserRecord| {
+                r.failed_login_count = 5;
+                r.locked_until = Some(until);
+            }),
+        };
+        let auth = LocalAuth::builder(store, sessions)
+            .mailer(crate::local::NoMailer)
+            .tokens(crate::session::MemoryOneTimeTokenStore::new())
+            .hasher(PasswordHasher::insecure_for_tests(HashLimits::default()).unwrap())
+            .require_verified_email(false)
+            .build()
+            .unwrap();
+        let id = users
+            .insert(NewUser {
+                username: "budi".into(),
+                email: "budi@example.com".into(),
+                name: "Budi".into(),
+                password_hash: Some(auth.hasher().hash(PASSWORD).await.unwrap()),
+            })
+            .await
+            .unwrap()
+            .id;
+        let result = auth
+            .login("budi", "wrong password", SessionContext::web())
+            .await;
+        assert!(matches!(result, Err(LocalError::AccountLocked { .. })));
+        let record = users.get(id).unwrap();
+        assert_eq!(record.failed_login_count, 5);
+        assert_eq!(record.locked_until, Some(until));
+    }
+
+    #[tokio::test]
+    async fn password_replaced_while_it_is_checked_does_not_log_in() {
+        // A reset stored a new hash after this login read the old one.
+        let (result, _) = login_while_account_changes(|r| {
+            r.password_hash = Some("$argon2id$v=19$m=8,t=1,p=1$c29tZXNhbHQ$aGFzaA".into());
+        })
+        .await;
+        assert!(matches!(result, Err(LocalError::InvalidCredentials)));
+    }
+
+    #[tokio::test]
+    async fn disabled_while_the_password_is_checked_does_not_log_in() {
+        let (result, _) =
+            login_while_account_changes(|r| r.user.disabled_at = Some(SystemTime::now())).await;
+        assert!(matches!(result, Err(LocalError::AccountDisabled)));
     }
 
     /// A user store whose hash replacement fails or reports a concurrent change.
