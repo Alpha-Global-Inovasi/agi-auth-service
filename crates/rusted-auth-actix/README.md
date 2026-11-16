@@ -105,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 - **Browsers** call `POST /login` and get the `__Host-session` cookie (`HttpOnly; Secure; SameSite=Lax`). Requests that change data must carry an `Origin` (or `Referer`) from the allowed origins and send the `__Host-csrf` cookie back in `X-CSRF-Token`; call `GET /csrf` once before the first form.
-- **Mobile apps** call `POST /mobile/login`, keep the token, and send `Authorization: Bearer` from then on. Bearer requests are not checked for CSRF.
+- **Mobile apps** call `POST /mobile/login`, keep the token, and send `Authorization: Bearer` from then on. Bearer requests without cookies are not checked for CSRF; native apps that send no `Cookie`, `Origin` or `Referer` can also use the routes before login without a CSRF token.
 - **Second factor**: give the same `Mfa` to `LocalAuthBuilder::mfa` and `AuthRoutesBuilder::mfa`. Without `LocalAuthBuilder::mfa`, logins never ask for the second factor, so `build` fails when only one side has it. `POST /mfa/verify` replaces the cookie, or returns the new token to bearer clients.
 - **Email links** should point at your front end, which posts the token. The routes' own `GET /email/verify` and `GET /password/reset` never use the token: they forward to `LinkTargets` with the token in the URL fragment, or show a plain form.
 - **Rate limits** per client address (`RateLimiter`) cover login, registration, the email-sending routes and the link-token routes. Give every process the same shared store and key. Behind a reverse proxy, set `WebConfig::trusted_proxies`.

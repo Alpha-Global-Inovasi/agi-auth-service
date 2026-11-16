@@ -40,12 +40,20 @@ pub(crate) const CSRF_FIELD: &str = "csrf_token";
 /// 2. send the value of the [`CSRF_COOKIE`] cookie back in the [`CSRF_HEADER`] header
 ///    (double submit), compared in constant time.
 ///
-/// Failing either is 403 `csrf_failed`. A request counts as coming from a browser when
-/// it has a `Cookie`, `Origin` or `Referer` header; the web login route always does,
-/// since its answer sets the session cookie. Requests with `Authorization: Bearer` are
-/// never checked: a page on another site cannot add that header without the server's
-/// CORS consent. A native app that sends neither cookies nor `Origin` is not checked
-/// either: without cookies the request carries no ambient authority to abuse, and a
+/// Failing either is 403 `csrf_failed`. Which requests count as coming from a browser:
+///
+/// - A route whose answer sets or replaces the session cookie (the web login, and the
+///   second-factor step of a cookie session) always does, whatever its headers.
+/// - A request with `Authorization: Bearer` does when it also has a `Cookie` header.
+///   Without cookies it does not: a page on another site cannot add that header
+///   without the server's CORS consent.
+/// - Any other request does when it has a `Cookie`, `Origin` or `Referer` header. An
+///   `Origin` header counts even when its value is `null` (sandboxed frames, some
+///   redirects), so such a request is checked and then refused, since `null` is never
+///   an allowed origin.
+///
+/// So a native app that sends neither cookies nor `Origin` nor `Referer` is not
+/// checked: without cookies the request carries no ambient authority to abuse, and a
 /// browser sends `Origin` with every cross-site request that changes data.
 ///
 /// The cookies are prefixed `__Host-`, so another subdomain cannot set or overwrite
@@ -116,23 +124,27 @@ impl WebConfig {
         self.proxies.client_ip_of(req)
     }
 
-    /// Apply the rule above. `always_browser` treats the request as coming from a
-    /// browser even without the headers that would say so; `form_token` is a CSRF
-    /// token from a form field.
+    /// Apply the rule above. `always_browser` is set by routes whose answer sets the
+    /// session cookie: the request is checked whatever its headers. `form_token` is a
+    /// CSRF token from a form field.
     pub(crate) fn check(
         &self,
         req: &HttpRequest,
         always_browser: bool,
         form_token: Option<&str>,
     ) -> Result<(), AuthFailure> {
-        if is_safe(req.method()) || bearer_token(req).is_some() {
+        if is_safe(req.method()) {
             return Ok(());
         }
         let headers = req.headers();
-        let browser = always_browser
-            || headers.contains_key(COOKIE)
-            || headers.contains_key(ORIGIN)
-            || headers.contains_key(REFERER);
+        let has_cookie = headers.contains_key(COOKIE);
+        let browser = if always_browser {
+            true
+        } else if bearer_token(req).is_some() {
+            has_cookie
+        } else {
+            has_cookie || headers.contains_key(ORIGIN) || headers.contains_key(REFERER)
+        };
         if !browser {
             return Ok(());
         }
@@ -349,7 +361,29 @@ mod tests {
             .insert_header((AUTHORIZATION, "Bearer rusted_s_x"))
             .insert_header((ORIGIN, "https://evil.example"))
             .to_http_request();
-        assert!(config.check(&bearer, true, None).is_ok());
+        assert!(config.check(&bearer, false, None).is_ok());
+        assert!(
+            config.check(&bearer, true, None).is_err(),
+            "a route that sets the session cookie is always checked"
+        );
+
+        let bearer_with_cookie = TestRequest::post()
+            .insert_header((AUTHORIZATION, "Bearer rusted_s_x"))
+            .cookie(Cookie::new(SESSION_COOKIE, "rusted_s_y"))
+            .to_http_request();
+        assert!(config.check(&bearer_with_cookie, false, None).is_err());
+
+        let null_origin = TestRequest::post()
+            .insert_header((ORIGIN, "null"))
+            .insert_header((REFERER, "https://app.example.com/"))
+            .insert_header((CSRF_HEADER, token))
+            .cookie(Cookie::new(CSRF_COOKIE, token))
+            .to_http_request();
+        assert!(config.check(&null_origin, false, None).is_err());
+        let null_origin_only = TestRequest::post()
+            .insert_header((ORIGIN, "null"))
+            .to_http_request();
+        assert!(config.check(&null_origin_only, false, None).is_err());
 
         let get = TestRequest::get()
             .insert_header((ORIGIN, "https://evil.example"))

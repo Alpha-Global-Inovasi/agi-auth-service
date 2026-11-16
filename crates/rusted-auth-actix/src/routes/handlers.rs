@@ -140,9 +140,11 @@ pub(super) async fn logout<U: UserStore, S: SessionStore>(
     state: Data<State<U, S>>,
 ) -> HttpResponse {
     let answer = async {
-        state.web.check(&req, false, None)?;
-        let sessions = state.local.sessions();
         let presented = presented_token(&req);
+        // Unless the client uses a bearer token, this answer clears the session cookie.
+        let bearer = matches!(presented, Some((_, Transport::Bearer)));
+        state.web.check(&req, !bearer, None)?;
+        let sessions = state.local.sessions();
         if let Some((token, _)) = &presented {
             // A login that waits for its second factor can be cancelled too.
             let found = match sessions.validate(token).await {
@@ -158,7 +160,7 @@ pub(super) async fn logout<U: UserStore, S: SessionStore>(
             }
         }
         let mut response = HttpResponse::NoContent();
-        if !matches!(presented, Some((_, Transport::Bearer))) {
+        if !bearer {
             cookies::clear_session(&mut response);
         }
         Ok(response.finish())

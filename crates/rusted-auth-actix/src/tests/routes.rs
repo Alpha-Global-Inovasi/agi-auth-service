@@ -7,7 +7,7 @@ use crate::{
 use actix_web::cookie::Cookie;
 use actix_web::http::StatusCode;
 use actix_web::http::header::{
-    AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap, LOCATION, ORIGIN, SET_COOKIE,
+    AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap, LOCATION, ORIGIN, REFERER, SET_COOKIE,
 };
 use actix_web::web::Bytes;
 use actix_web::{App, HttpResponse, test, web};
@@ -407,6 +407,139 @@ async fn browser_requests_without_csrf_or_with_a_foreign_origin_are_refused() {
 
     let reply = send!(app, browser, post("/api/notes", json!({})));
     assert_eq!(reply.status, StatusCode::CREATED);
+}
+
+#[actix_web::test]
+async fn which_requests_count_as_coming_from_a_browser() {
+    let fixture = Fixture::new();
+    fixture.account("budi").await;
+    let app = app!(fixture);
+    let browser = logged_in!(app, "budi");
+    let session = browser.session().cloned().unwrap();
+
+    // `Origin: null` counts as an Origin header, and is never allowed, even with a
+    // matching Referer and CSRF token.
+    let reply = send!(
+        app,
+        browser
+            .dress(post("/api/notes", json!({})))
+            .insert_header((ORIGIN, "null"))
+            .insert_header((REFERER, format!("{ORIGIN_URL}/notes")))
+    );
+    assert_eq!(reply.code(), "csrf_failed");
+    let reply = send!(
+        app,
+        post(
+            "/auth/password/forgot",
+            json!({ "email": "budi@example.com" })
+        )
+        .insert_header((ORIGIN, "null"))
+    );
+    assert_eq!(reply.code(), "csrf_failed", "also before login");
+
+    // A bearer token together with cookies is a browser request.
+    let mobile = send!(
+        app,
+        post("/auth/mobile/login", login_body("budi", PASSWORD))
+    );
+    let bearer = format!(
+        "Bearer {}",
+        mobile.json()["data"]["token"].as_str().unwrap()
+    );
+    let reply = send!(
+        app,
+        post("/api/notes", json!({}))
+            .insert_header((AUTHORIZATION, bearer.as_str()))
+            .insert_header((COOKIE, format!("{SESSION_COOKIE}={session}")))
+    );
+    assert_eq!(reply.code(), "csrf_failed");
+    let reply = send!(
+        app,
+        post("/auth/logout", json!({}))
+            .insert_header((AUTHORIZATION, bearer.as_str()))
+            .insert_header((COOKIE, format!("{SESSION_COOKIE}={session}")))
+    );
+    assert_eq!(reply.code(), "csrf_failed");
+
+    // Routes that write the session cookie are checked whatever the headers say.
+    let reply = send!(
+        app,
+        post("/auth/login", login_body("budi", PASSWORD))
+            .insert_header((AUTHORIZATION, bearer.as_str()))
+    );
+    assert_eq!(
+        reply.code(),
+        "csrf_failed",
+        "web login with a bearer header"
+    );
+    assert!(reply.headers.get(SET_COOKIE).is_none());
+    let reply = send!(app, post("/auth/logout", json!({})));
+    assert_eq!(
+        reply.code(),
+        "csrf_failed",
+        "logout without a bearer token clears the cookie"
+    );
+
+    // Both sessions still work.
+    let reply = send!(app, browser.dress(get("/api/me")));
+    assert_eq!(reply.text(), "budi");
+    let reply = send!(
+        app,
+        get("/api/me").insert_header((AUTHORIZATION, bearer.as_str()))
+    );
+    assert_eq!(reply.text(), "budi");
+}
+
+#[actix_web::test]
+async fn native_clients_use_the_routes_before_login_without_csrf() {
+    let fixture = Fixture::new();
+    let app = app!(fixture);
+
+    // No Cookie, Origin or Referer: nothing a browser would send.
+    let reply = send!(
+        app,
+        post("/auth/register", registration("budi", "budi@example.com"))
+    );
+    assert_eq!(reply.status, StatusCode::ACCEPTED, "{}", reply.text());
+    let reply = send!(
+        app,
+        post(
+            "/auth/email/verify/resend",
+            json!({ "email": "budi@example.com" })
+        )
+    );
+    assert_eq!(reply.status, StatusCode::ACCEPTED, "{}", reply.text());
+    let token = fixture.last_token();
+    let reply = send!(app, post("/auth/email/verify", json!({ "token": token })));
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.text());
+
+    let reply = send!(
+        app,
+        post(
+            "/auth/password/forgot",
+            json!({ "email": "budi@example.com" })
+        )
+    );
+    assert_eq!(reply.status, StatusCode::ACCEPTED, "{}", reply.text());
+    let token = fixture.last_token();
+    let reply = send!(
+        app,
+        post(
+            "/auth/password/reset",
+            json!({ "token": token, "password": "another long passphrase" })
+        )
+    );
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.text());
+
+    let reply = send!(
+        app,
+        post(
+            "/auth/mobile/login",
+            login_body("budi", "another long passphrase")
+        )
+    );
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert!(reply.headers.get(SET_COOKIE).is_none());
 }
 
 #[actix_web::test]
@@ -1044,6 +1177,22 @@ mod mfa {
         let reply = send!(app, browser, get("/api/me"));
         assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
         assert_eq!(reply.code(), "mfa_required");
+
+        // The web step replaces the cookie, so it is always checked for CSRF, also
+        // when the pending token comes in a bearer header next to the cookie.
+        let reply = send!(
+            app,
+            post("/auth/mfa/verify", json!({ "code": code(&secret, 1) }))
+                .insert_header((COOKIE, format!("{SESSION_COOKIE}={pending}")))
+        );
+        assert_eq!(reply.code(), "csrf_failed");
+        let reply = send!(
+            app,
+            post("/auth/mfa/verify", json!({ "code": code(&secret, 1) }))
+                .insert_header((AUTHORIZATION, format!("Bearer {pending}")))
+                .insert_header((COOKIE, format!("{SESSION_COOKIE}={pending}")))
+        );
+        assert_eq!(reply.code(), "csrf_failed");
 
         let reply = send!(
             app,
