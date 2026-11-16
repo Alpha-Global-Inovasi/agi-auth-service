@@ -1,62 +1,85 @@
+use crate::failure::AuthFailure;
 use actix_web::HttpResponse;
 use actix_web::http::StatusCode;
-use actix_web::http::header::{HeaderValue, WWW_AUTHENTICATE};
-use rusted_auth::AuthError;
+use actix_web::http::header::{CONTENT_TYPE, HeaderValue, RETRY_AFTER, WWW_AUTHENTICATE};
+use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
-/// Turns an authentication failure into an HTTP response.
+/// Turns a failed request into an HTTP response.
 ///
-/// Implement this to keep error bodies in your application's own format. Use
-/// [`AuthError::public_message`] for anything sent to the client and
-/// [`status_for`](AuthResponder::status_for) for the status code. The `Display` output of
-/// the error is for logs only.
+/// Implement this to keep error bodies in your application's own format, for example
+/// to add a request id. Use [`AuthFailure::status`], [`AuthFailure::code`],
+/// [`AuthFailure::public_message`] and [`AuthFailure::field_errors`]; the `Display`
+/// output of the failure is for logs only. The crate adds `WWW-Authenticate` to 401
+/// answers of bearer-token requests and `Retry-After` to 429 and 503 answers, unless
+/// the response already has them.
 ///
 /// ```rust
 /// use actix_web::HttpResponse;
-/// use rusted_auth::AuthError;
-/// use rusted_auth_actix::AuthResponder;
+/// use rusted_auth_actix::{AuthFailure, AuthResponder};
 ///
 /// struct PlainText;
 ///
 /// impl AuthResponder for PlainText {
-///     fn respond(&self, error: &AuthError) -> HttpResponse {
-///         HttpResponse::build(Self::status_for(error)).body(error.public_message())
+///     fn respond(&self, failure: &AuthFailure) -> HttpResponse {
+///         HttpResponse::build(failure.status()).body(failure.public_message())
 ///     }
 /// }
 /// ```
 pub trait AuthResponder: Send + Sync + 'static {
-    /// Build the response for `error`.
-    fn respond(&self, error: &AuthError) -> HttpResponse;
-
-    /// The status code this crate recommends for `error`:
-    /// 503 when the issuer's keys are unavailable, 500 for misconfiguration, 401 otherwise.
-    fn status_for(error: &AuthError) -> StatusCode
-    where
-        Self: Sized,
-    {
-        status_for(error)
-    }
+    /// Build the response for `failure`.
+    fn respond(&self, failure: &AuthFailure) -> HttpResponse;
 }
 
-pub(crate) fn status_for(error: &AuthError) -> StatusCode {
-    match error {
-        AuthError::KeysUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-        e if e.is_server_error() => StatusCode::INTERNAL_SERVER_ERROR,
-        _ => StatusCode::UNAUTHORIZED,
-    }
-}
-
-/// Default responder: `{"status": false, "message": "...", "data": null}`.
+/// Default responder: RFC 9457 problem details (`application/problem+json`).
+///
+/// ```json
+/// {
+///   "type": "about:blank",
+///   "title": "Validation failed",
+///   "status": 422,
+///   "code": "validation_failed",
+///   "errors": {
+///     "password": [{ "code": "too_short", "message": "Password is too short", "params": { "min": 8 } }]
+///   }
+/// }
+/// ```
+///
+/// `errors` appears only on 422. `title` is [`AuthFailure::public_message`].
 #[derive(Debug, Clone, Copy, Default)]
-pub struct JsonResponder;
+pub struct ProblemResponder;
 
-impl AuthResponder for JsonResponder {
-    fn respond(&self, error: &AuthError) -> HttpResponse {
-        HttpResponse::build(status_for(error)).json(serde_json::json!({
-            "status": false,
-            "message": error.public_message(),
-            "data": null,
-        }))
+impl ProblemResponder {
+    /// The problem details body for `failure`, for responders that add members of
+    /// their own (such as a request id) to it.
+    pub fn body(failure: &AuthFailure) -> Value {
+        let mut body = json!({
+            "type": "about:blank",
+            "title": failure.public_message(),
+            "status": failure.status().as_u16(),
+            "code": failure.code(),
+        });
+        if !failure.field_errors().is_empty() {
+            let mut errors = Map::new();
+            for error in failure.field_errors() {
+                let entry = errors
+                    .entry(error.field)
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                if let (Value::Array(list), Ok(value)) = (entry, serde_json::to_value(error)) {
+                    list.push(value);
+                }
+            }
+            body["errors"] = Value::Object(errors);
+        }
+        body
+    }
+}
+
+impl AuthResponder for ProblemResponder {
+    fn respond(&self, failure: &AuthFailure) -> HttpResponse {
+        HttpResponse::build(failure.status())
+            .insert_header((CONTENT_TYPE, "application/problem+json"))
+            .body(Self::body(failure).to_string())
     }
 }
 
@@ -66,26 +89,28 @@ impl AuthResponder for JsonResponder {
 pub(crate) struct SharedResponder(pub Arc<dyn AuthResponder>);
 
 impl SharedResponder {
-    /// Log the failure, build the response, and add `WWW-Authenticate` to 401s
-    /// (RFC 6750 section 3) unless the responder already set one.
-    pub fn respond(&self, error: &AuthError) -> HttpResponse {
-        if error.is_server_error() {
-            tracing::error!(%error, "authentication unavailable");
+    /// Log the failure, build the response, and add `WWW-Authenticate` (RFC 6750
+    /// section 3) and `Retry-After` unless the responder already set them.
+    pub fn respond(&self, failure: &AuthFailure) -> HttpResponse {
+        if failure.is_server_error() {
+            tracing::error!(%failure, "authentication unavailable");
         } else {
-            tracing::debug!(%error, "authentication rejected");
+            tracing::debug!(%failure, "authentication request rejected");
         }
 
-        let mut response = self.0.respond(error);
-        if response.status() == StatusCode::UNAUTHORIZED
-            && !response.headers().contains_key(WWW_AUTHENTICATE)
+        let mut response = self.0.respond(failure);
+        let headers = response.headers_mut();
+        if let Some(challenge) = failure.challenge()
+            && failure.status() == StatusCode::UNAUTHORIZED
+            && !headers.contains_key(WWW_AUTHENTICATE)
         {
-            let challenge = match error {
-                AuthError::MissingCredentials => "Bearer",
-                _ => "Bearer error=\"invalid_token\"",
-            };
-            response
-                .headers_mut()
-                .insert(WWW_AUTHENTICATE, HeaderValue::from_static(challenge));
+            headers.insert(WWW_AUTHENTICATE, HeaderValue::from_static(challenge));
+        }
+        if let Some(after) = failure.retry_after()
+            && !headers.contains_key(RETRY_AFTER)
+        {
+            let seconds = after.as_secs().max(1);
+            headers.insert(RETRY_AFTER, HeaderValue::from(seconds));
         }
         response
     }
@@ -93,6 +118,6 @@ impl SharedResponder {
 
 impl Default for SharedResponder {
     fn default() -> Self {
-        Self(Arc::new(JsonResponder))
+        Self(Arc::new(ProblemResponder))
     }
 }

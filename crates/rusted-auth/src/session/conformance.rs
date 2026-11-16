@@ -982,6 +982,7 @@ pub async fn attempt_store<A: AttemptStore>(attempts: &A) {
         AttemptScope::Change,
         AttemptScope::Email,
         AttemptScope::PasswordChange,
+        AttemptScope::ClientAddress,
     ] {
         assert_eq!(
             attempts

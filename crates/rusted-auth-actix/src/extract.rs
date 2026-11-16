@@ -1,3 +1,4 @@
+use crate::failure::AuthFailure;
 use crate::responder::SharedResponder;
 use actix_web::dev::Payload;
 use actix_web::error::InternalError;
@@ -51,7 +52,7 @@ impl FromRequest for Authenticated {
                     .get::<SharedResponder>()
                     .cloned()
                     .unwrap_or_default()
-                    .respond(&error);
+                    .respond(&AuthFailure::from(AuthError::MissingCredentials));
                 Err(InternalError::from_response(error, response).into())
             }
         })

@@ -1,10 +1,10 @@
 [package]
 name = "rusted-auth-actix"
-description = "Actix-web middleware and extractors for rusted-auth"
+description = "Actix-web middleware, extractors and routes for rusted-auth"
 readme = "README.md"
-keywords = ["auth", "actix", "actix-web", "jwt", "middleware"]
+keywords = ["auth", "actix", "actix-web", "session", "middleware"]
 categories = ["authentication", "web-programming::http-server"]
-include = ["src/*.rs", "examples/*.rs", "README.md", "LICENSE-MIT", "LICENSE-APACHE"]
+include = ["src/*.rs", "src/routes/*.rs", "examples/*.rs", "README.md", "LICENSE-MIT", "LICENSE-APACHE"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,16 +17,43 @@ homepage.workspace = true
 default = ["rustls-tls"]
 rustls-tls = ["rusted-auth/rustls-tls"]
 native-tls = ["rusted-auth/native-tls"]
+# Session cookies and bearer tokens, CSRF protection and per-address rate limits.
+session = ["rusted-auth/session", "dep:base64", "dep:getrandom", "dep:hmac", "dep:sha2", "dep:subtle", "dep:uuid", "dep:zeroize"]
+# HTTP routes for local accounts, and a mailer wrapper that sends in the background.
+local = ["session", "rusted-auth/local", "dep:tokio"]
+# Routes for the second factor (TOTP and recovery codes).
+mfa = ["local", "rusted-auth/mfa"]
+# OpenAPI paths and schemas of the routes, for utoipa 6.
+utoipa = ["local", "dep:utoipa"]
+# Cheap password hashing and recording mailers from rusted-auth, for tests of
+# applications. Never enable this in a production build.
+test-util = ["local", "rusted-auth/test-util"]
 
 [dependencies]
 rusted-auth = { workspace = true }
-actix-web = { workspace = true }
+actix-web = { workspace = true, features = ["cookies"] }
+base64 = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true, optional = true }
+subtle = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt", "sync"] }
 tracing = { workspace = true }
+utoipa = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true, features = ["serde"] }
+zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
+hmac = { workspace = true }
 jsonwebtoken = { workspace = true }
+sha1 = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
 tracing-subscriber = { workspace = true }
+
+[package.metadata.docs.rs]
+features = ["mfa", "utoipa"]
 
 [lints]
 workspace = true
