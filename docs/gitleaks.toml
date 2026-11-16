@@ -1,0 +1,17 @@
+# gitleaks rules for rusted-auth tokens. Copy into the .gitleaks.toml of the
+# repositories you scan. See secret-scanning.md.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "rusted-auth-session-token"
+description = "rusted-auth session token"
+regex = '''\brusted_s_[A-Za-z0-9_-]{43}(?:[^A-Za-z0-9_-]|$)'''
+keywords = ["rusted_s_"]
+
+[[rules]]
+id = "rusted-auth-link-token"
+description = "rusted-auth single-use link token (email verification, password reset)"
+regex = '''\brusted_t_[A-Za-z0-9_-]{43}(?:[^A-Za-z0-9_-]|$)'''
+keywords = ["rusted_t_"]

@@ -8,8 +8,9 @@ Until 1.0, only the latest minor release receives security fixes.
 
 | Version | Supported |
 |---|---|
-| 0.4.x | yes |
-| < 0.4 (`cf-auth`) | no |
+| 0.5.x | yes |
+| 0.4.x | no |
+| < 0.4 (`agi-auth`, `cf-auth`) | no |
 
 ## Reporting a vulnerability
 
@@ -33,7 +34,10 @@ Please give us reasonable time to release a fix before disclosing publicly.
 
 In scope: token verification bypass, key confusion between issuers, algorithm confusion,
 information leaks in error responses or logs, denial of service through crafted tokens or
-JWKS documents, and anything that weakens the guarantees described in the README.
+JWKS documents, and anything that weakens the guarantees described in the README and in
+[docs/security.md](docs/security.md): for local accounts, among others, ways to tell
+registered addresses apart beyond the known limits listed there, lockout or rate limit
+bypasses, session fixation, CSRF bypasses, and second-factor bypasses.
 
 Out of scope: vulnerabilities in an identity provider itself, and misconfiguration by the
 application (for example trusting an issuer you do not control).

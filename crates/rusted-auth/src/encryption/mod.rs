@@ -21,6 +21,13 @@
 //! 3. Once no record uses the old key ([`Keyring::key_id_of`] tells which key a record
 //!    uses), remove it.
 //!
+//! **Recovery codes of the `mfa` module are hashed, not encrypted**, under a key derived
+//! from the keyring key that was active when they were made. They cannot be moved to a
+//! new key: they keep working while their key is in the keyring, and stop matching,
+//! without an error, once it is removed. Remove an old key only after every user whose
+//! recovery codes were made under it has generated a new set
+//! (`Mfa::regenerate_recovery_codes`).
+//!
 //! The library never reads environment variables or files: the application loads the
 //! keys from wherever it keeps secrets and builds the keyring.
 //! [`Keyring::parse`] reads the common `id:base64key,id:base64key` form, for example

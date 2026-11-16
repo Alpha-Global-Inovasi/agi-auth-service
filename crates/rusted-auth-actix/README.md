@@ -104,13 +104,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-- **Browsers** call `POST /login` and get the `__Host-session` cookie (`HttpOnly; Secure; SameSite=Lax`). Requests that change data must carry an `Origin` (or `Referer`) from the allowed origins and send the `__Host-csrf` cookie back in `X-CSRF-Token`; call `GET /csrf` once before the first form.
+- **Browsers** call `POST /login` and get the `__Host-session` cookie (`HttpOnly; Secure; SameSite=Lax; Path=/`). Requests that change data must carry an `Origin` (or `Referer`) from the allowed origins and send the `__Host-csrf` cookie back in `X-CSRF-Token`; call `GET /csrf` once before the first form. `WebConfig::new` requires at least one allowed origin.
+- **Which requests are checked.** A request that changes data counts as a browser request, and is checked, when its route sets or clears the session cookie (`/login`, `/mfa/verify` with a cookie session, `/logout` without a bearer token), when it has `Authorization: Bearer` together with a `Cookie` header, or when it has no bearer token and any of `Cookie`, `Origin` or `Referer` (`Origin: null` included, which is then refused).
 - **Mobile apps** call `POST /mobile/login`, keep the token, and send `Authorization: Bearer` from then on. Bearer requests without cookies are not checked for CSRF; native apps that send no `Cookie`, `Origin` or `Referer` can also use the routes before login without a CSRF token.
 - **Second factor**: give the same `Mfa` to `LocalAuthBuilder::mfa` and `AuthRoutesBuilder::mfa`. Without `LocalAuthBuilder::mfa`, logins never ask for the second factor, so `build` fails when only one side has it. `POST /mfa/verify` replaces the cookie, or returns the new token to bearer clients.
 - **Email links** should point at your front end, which posts the token. The routes' own `GET /email/verify` and `GET /password/reset` never use the token: they forward to `LinkTargets` with the token in the URL fragment, or show a plain form.
 - **Rate limits** per client address (`RateLimiter`) cover login, registration, the email-sending routes and the link-token routes. Give every process the same shared store and key. Behind a reverse proxy, set `WebConfig::trusted_proxies`.
 - **Email delivery** must not wait for SMTP. Without a job queue, wrap your mailer in `SpawnMailer`.
-- **OpenAPI**: the `utoipa` feature adds `openapi::AuthApi` and `openapi::MfaApi` (utoipa 6).
+- **Password reset** revokes every session of the account: at once in the process that handled it, and within the session cache lifetime (30 seconds) in the others. Using the link and storing the new password are two store calls, not one transaction; if storing fails, the user asks for a new link.
+- **Second-factor guesses** are limited per login (5) and per account across logins (20 per hour), besides the per-address rate limit.
+- **OpenAPI**: the `utoipa` feature adds `openapi::AuthApi`, `openapi::UsernameAvailableApi` and `openapi::MfaApi` (utoipa 6). `AuthRoutes::openapi` returns the document of exactly the routes it mounts.
+
+Read the [security notes](https://github.com/Alpha-Global-Inovasi/rusted-auth/blob/main/docs/security.md) before going to production, and the [migration guide](https://github.com/Alpha-Global-Inovasi/rusted-auth/blob/main/docs/migrating-to-0.5.md) when upgrading from 0.4: `AuthResponder::respond` now takes an `AuthFailure`, `JsonResponder` is gone, and the default body is RFC 9457 problem details.
 
 ## Responses
 
