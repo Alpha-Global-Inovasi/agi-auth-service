@@ -557,6 +557,29 @@ impl<U: UserStore, S: SessionStore> LocalAuth<U, S> {
         &self.inner.sessions
     }
 
+    /// Whether registration reports email addresses that already have an account
+    /// ([`LocalAuthBuilder::reveal_existing_email`]). When it does not, web adapters
+    /// leave out the route of [`username_available`](Self::username_available).
+    pub fn reveals_existing_email(&self) -> bool {
+        self.inner.reveal_existing_email
+    }
+
+    /// Whether password logins wait for a second factor, that is whether
+    /// [`LocalAuthBuilder::mfa`] was called. Always `false` without the `mfa` feature.
+    ///
+    /// Web adapters check this when they are given an `mfa::Mfa` as well, since a
+    /// service built without it lets accounts with TOTP log in with the password alone.
+    pub fn second_factor_enabled(&self) -> bool {
+        #[cfg(feature = "mfa")]
+        {
+            self.inner.second_factor.is_some()
+        }
+        #[cfg(not(feature = "mfa"))]
+        {
+            false
+        }
+    }
+
     /// The password hasher, for sharing its concurrency limit with other components.
     pub fn hasher(&self) -> &PasswordHasher {
         &self.inner.hasher

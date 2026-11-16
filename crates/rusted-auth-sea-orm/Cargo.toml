@@ -37,6 +37,10 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 rusted-auth = { workspace = true, features = ["test-util", "mfa"] }
+# One end-to-end path through the HTTP routes on this storage.
+rusted-auth-actix = { path = "../rusted-auth-actix", version = "0.4.1", features = ["local"] }
+actix-web = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 uuid = { workspace = true }
 

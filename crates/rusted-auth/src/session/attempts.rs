@@ -25,16 +25,21 @@ pub enum AttemptScope {
     Email,
     /// Wrong current passwords given to change the password. The key is the account.
     PasswordChange,
+    /// Requests from one client address, for rate limits in web adapters. The key is a
+    /// keyed hash of the address and the name of the limit, never the address itself.
+    ClientAddress,
 }
 
 impl AttemptScope {
-    /// The name to store: `login`, `change`, `email` or `password_change`.
+    /// The name to store: `login`, `change`, `email`, `password_change` or
+    /// `client_address`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Login => "login",
             Self::Change => "change",
             Self::Email => "email",
             Self::PasswordChange => "password_change",
+            Self::ClientAddress => "client_address",
         }
     }
 }
@@ -300,5 +305,6 @@ mod tests {
         assert_eq!(scope.as_str(), "change");
         assert_eq!(AttemptScope::Email.as_str(), "email");
         assert_eq!(AttemptScope::PasswordChange.as_str(), "password_change");
+        assert_eq!(AttemptScope::ClientAddress.as_str(), "client_address");
     }
 }

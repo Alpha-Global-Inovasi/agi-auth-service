@@ -434,3 +434,136 @@ async fn a_lockout_and_a_password_reset_work_across_two_processes() {
             .unwrap();
     });
 }
+
+/// The HTTP routes of `rusted-auth-actix` on Postgres storage, as a mobile client uses
+/// them: registration, verification, login with a bearer token, rate limits shared
+/// through `auth_attempts`, and logout.
+#[actix_web::test]
+async fn http_routes_work_on_postgres() {
+    use actix_web::http::StatusCode;
+    use actix_web::http::header::{AUTHORIZATION, CONTENT_TYPE};
+    use actix_web::{App, HttpResponse, test, web};
+    use rusted_auth_actix::{
+        AuthRoutes, Bucket, CurrentSession, Limit, RateLimiter, RateLimits, SessionAuth, WebConfig,
+    };
+    use serde_json::{Value, json};
+
+    async fn me(current: CurrentSession) -> HttpResponse {
+        HttpResponse::Ok().body(current.user.username.clone())
+    }
+
+    fn post(path: &str, body: Value) -> test::TestRequest {
+        test::TestRequest::post()
+            .uri(path)
+            .insert_header((CONTENT_TYPE, "application/json"))
+            .peer_addr("198.51.100.7:4000".parse().unwrap())
+            .set_payload(body.to_string())
+    }
+
+    const PASSWORD: &str = "correct horse battery staple";
+    with_db!(|db| {
+        let store = db.store.clone();
+        let sessions = SessionManager::new(store.clone());
+        let mailer = RecordingMailer::new();
+        let local = local_auth(&store, sessions.clone())
+            .mailer(mailer.clone())
+            .build()
+            .unwrap();
+        let web_config = WebConfig::new(["https://app.example.com"]).unwrap();
+        let limits =
+            RateLimits::default().set(Bucket::Email, Limit::new(2, Duration::from_secs(60)));
+        let routes = AuthRoutes::builder(local, web_config.clone())
+            .rate_limiter(RateLimiter::shared(store.clone(), [9; 32]).limits(limits))
+            .build()
+            .unwrap();
+        let app = test::init_service(
+            App::new()
+                .wrap(SessionAuth::new(sessions.clone(), web_config))
+                .service(web::scope("/api/auth").configure(|cfg| routes.configure(cfg)))
+                .route("/api/me", web::get().to(me)),
+        )
+        .await;
+
+        let registration = json!({
+            "username": "budi", "email": "budi@example.com", "name": "Budi", "password": PASSWORD,
+        });
+        let resp =
+            test::call_service(&app, post("/api/auth/register", registration).to_request()).await;
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let token = mailer
+            .take()
+            .into_iter()
+            .find_map(|email| email.token().map(|t| t.expose().to_owned()))
+            .expect("a verification email");
+        let resp = test::call_service(
+            &app,
+            post("/api/auth/email/verify", json!({ "token": token })).to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let login = json!({ "identifier": "budi@example.com", "password": PASSWORD });
+        let resp =
+            test::call_service(&app, post("/api/auth/mobile/login", login).to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = test::read_body_json(resp).await;
+        let bearer = format!("Bearer {}", body["data"]["token"].as_str().unwrap());
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/api/me")
+                .insert_header((AUTHORIZATION, bearer.as_str()))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(test::read_body(resp).await, "budi");
+
+        // The email limit is counted in `auth_attempts`, under a hashed key.
+        for expected in [
+            StatusCode::ACCEPTED,
+            StatusCode::ACCEPTED,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            let forgot = post(
+                "/api/auth/password/forgot",
+                json!({ "email": "budi@example.com" }),
+            );
+            let resp = test::call_service(&app, forgot.to_request()).await;
+            assert_eq!(resp.status(), expected);
+        }
+        let scopes = db
+            .texts("SELECT scope || ':' || count FROM auth_attempts WHERE scope = 'client_address' ORDER BY count")
+            .await;
+        // One row per bucket: register, verification token and login once each, and the
+        // email bucket full after two requests.
+        assert_eq!(
+            scopes,
+            [
+                "client_address:1",
+                "client_address:1",
+                "client_address:1",
+                "client_address:2"
+            ]
+        );
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/auth/logout")
+                .insert_header((AUTHORIZATION, bearer.as_str()))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/api/me")
+                .insert_header((AUTHORIZATION, bearer.as_str()))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    });
+}

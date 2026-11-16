@@ -107,7 +107,7 @@ where
                         .map(ServiceResponse::map_into_left_body)
                 }
                 Err(error) => {
-                    let response = config.responder.respond(&error);
+                    let response = config.responder.respond(&error.into());
                     Ok(req.into_response(response).map_into_right_body())
                 }
             }

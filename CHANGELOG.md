@@ -163,6 +163,35 @@ may contain breaking changes.
   application's migrator. `SeaOrmStore::cleanup` deletes ended sessions, used and
   expired tokens, ended attempt counters, and audit events older than a year
   (`Retention`), for a periodic job of the application. The crate needs Rust 1.94.
+- `rusted-auth-actix`: `session` feature with `SessionAuth`, which finds the session in
+  the `__Host-session` cookie or an `Authorization: Bearer` token and hands handlers a
+  `CurrentSession` or `MaybeSession`. Browser requests that change data need an allowed
+  `Origin` (or `Referer`) and the `__Host-csrf` cookie echoed in `X-CSRF-Token`
+  (`WebConfig`).
+- `rusted-auth-actix`: `local` feature with `AuthRoutes`, the HTTP routes for local
+  accounts: register, web and mobile login, logout, email verification, resending it,
+  forgot, reset and change password, and with `mfa` the second factor (verify, status,
+  TOTP start, confirm and disable, new recovery codes). A successful second factor
+  replaces the cookie or returns a new token. Email links open a page that posts the
+  token, or forward to the application (`LinkTargets`), with
+  `Referrer-Policy: no-referrer`. Registration answers the same for a new and a
+  registered address unless `reveal_existing_email` is on.
+- `rusted-auth-actix`: `RateLimiter`, per-client-address limits for login,
+  registration, emails and tokens, in memory or shared through an `AttemptStore`. The
+  address is stored as a keyed HMAC, IPv6 grouped by /64. `TrustedProxies` reads
+  `X-Forwarded-For` from the right, past the listed proxies.
+- `rusted-auth-actix`: `SpawnMailer` sends emails on a tokio task, with a bounded queue.
+- `rusted-auth-actix`: `utoipa` feature with `openapi::AuthApi` and `openapi::MfaApi`,
+  the OpenAPI paths and schemas of the routes for utoipa 6.
+- `AttemptScope::ClientAddress`, and `LocalAuth::second_factor_enabled` and
+  `LocalAuth::reveals_existing_email`.
+
+### Changed
+
+- `rusted-auth-actix`: `AuthResponder::respond` takes an `AuthFailure` (status, stable
+  `code`, public message, field errors) instead of an `AuthError`. The default
+  `ProblemResponder` writes RFC 9457 problem details (`application/problem+json`);
+  `JsonResponder` is removed.
 
 ## [0.4.1] - 2026-11-15
 

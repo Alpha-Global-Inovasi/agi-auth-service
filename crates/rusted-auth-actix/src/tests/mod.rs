@@ -1,9 +1,9 @@
-use crate::{AuthResponder, Authenticate, Authenticated, MaybeAuthenticated};
+use crate::{AuthFailure, AuthResponder, Authenticate, Authenticated, MaybeAuthenticated};
 use actix_web::http::StatusCode;
 use actix_web::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use actix_web::{App, HttpResponse, test, web};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use rusted_auth::{AuthError, Issuer, Verifier};
+use rusted_auth::{Issuer, Verifier};
 use serde_json::{Value, json};
 
 const ISSUER: &str = "https://issuer.test";
@@ -83,10 +83,19 @@ async fn required_rejects_a_missing_header() {
 
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(resp.headers().get(WWW_AUTHENTICATE).unwrap(), "Bearer");
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "application/problem+json"
+    );
     let body: Value = test::read_body_json(resp).await;
     assert_eq!(
         body,
-        json!({"status": false, "message": "Authentication required", "data": null})
+        json!({
+            "type": "about:blank",
+            "title": "Authentication required",
+            "status": 401,
+            "code": "unauthenticated",
+        })
     );
 }
 
@@ -167,8 +176,8 @@ async fn extractor_without_middleware_is_unauthorized() {
 struct TeapotResponder;
 
 impl AuthResponder for TeapotResponder {
-    fn respond(&self, error: &AuthError) -> HttpResponse {
-        HttpResponse::ImATeapot().body(format!("custom: {}", error.public_message()))
+    fn respond(&self, failure: &AuthFailure) -> HttpResponse {
+        HttpResponse::ImATeapot().body(format!("custom: {}", failure.public_message()))
     }
 }
 
@@ -209,5 +218,9 @@ async fn unreachable_issuer_is_503() {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(resp.headers().get(WWW_AUTHENTICATE).is_none());
     let body: Value = test::read_body_json(resp).await;
-    assert_eq!(body["message"], "Authentication service unavailable");
+    assert_eq!(body["title"], "Authentication service unavailable");
+    assert_eq!(body["code"], "unavailable");
 }
+
+#[cfg(feature = "test-util")]
+mod routes;
