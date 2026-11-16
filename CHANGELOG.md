@@ -150,6 +150,19 @@ may contain breaking changes.
 - `test-util` cargo feature: `PasswordHasher::insecure_for_tests`, a hasher with the
   weakest argon2 parameters so that test suites stay fast. Never enable it in a
   production build.
+  - `session::conformance` (and `mfa::conformance` with the `mfa` feature): checks that
+    a storage implementation behaves like the in-memory stores, including the
+    operations the traits require to be atomic under concurrent calls. The in-memory
+    stores pass them.
+- New crate `rusted-auth-sea-orm`: Postgres storage with SeaORM 2.0. `SeaOrmStore`
+  implements `UserStore`, `SessionStore`, `OneTimeTokenStore`, `AttemptStore` and,
+  with its `mfa` feature, `MfaStore`; `SeaOrmStore::event_sink` records audit events in
+  `auth_events` through a bounded queue and a writer task. The `migration` module
+  creates `users`, `sessions`, `one_time_tokens`, `mfa_totp`, `mfa_recovery_codes`,
+  `auth_attempts` and `auth_events`, either through `Migrator` or merged into the
+  application's migrator. `SeaOrmStore::cleanup` deletes ended sessions, used and
+  expired tokens, ended attempt counters, and audit events older than a year
+  (`Retention`), for a periodic job of the application. The crate needs Rust 1.94.
 
 ## [0.4.1] - 2026-11-15
 
