@@ -1345,3 +1345,32 @@ mod mfa {
         assert_eq!(reply.code(), "unauthenticated");
     }
 }
+
+#[cfg(feature = "utoipa")]
+#[::core::prelude::v1::test]
+fn openapi_lists_exactly_the_mounted_routes() {
+    let paths = |fixture: &Fixture| -> Vec<String> {
+        fixture
+            .routes()
+            .openapi()
+            .paths
+            .paths
+            .keys()
+            .cloned()
+            .collect()
+    };
+    let default = paths(&Fixture::new());
+    assert!(default.contains(&"/login".to_owned()));
+    assert!(!default.contains(&"/username-available".to_owned()));
+    assert!(!default.iter().any(|path| path.starts_with("/mfa")));
+
+    let revealing = paths(&Fixture::build(false, true));
+    assert!(revealing.contains(&"/username-available".to_owned()));
+
+    #[cfg(feature = "mfa")]
+    {
+        let with_mfa = paths(&Fixture::build(true, false));
+        assert!(with_mfa.contains(&"/mfa/verify".to_owned()));
+        assert!(!with_mfa.contains(&"/username-available".to_owned()));
+    }
+}

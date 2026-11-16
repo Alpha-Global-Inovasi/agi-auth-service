@@ -1,9 +1,11 @@
 //! OpenAPI description of [`AuthRoutes`](crate::AuthRoutes), for utoipa 6.
 //!
 //! [`AuthApi`] holds the paths of the local-account routes and their schemas;
-//! [`MfaApi`] (with the `mfa` feature) those of the second factor. Paths are relative
-//! to the scope the routes are mounted under, so nest the documents at the same
-//! place:
+//! [`UsernameAvailableApi`] the username check, which is only mounted when
+//! registration reveals existing addresses; [`MfaApi`] (with the `mfa` feature) the
+//! second factor. [`AuthRoutes::openapi`](crate::AuthRoutes::openapi) merges exactly
+//! the ones a set of routes mounts. Paths are relative to the scope the routes are
+//! mounted under, so nest the documents at the same place:
 //!
 //! ```rust
 //! use utoipa::OpenApi;
@@ -82,7 +84,7 @@ fn register() {}
     description = "Log in from a browser. Sets the `__Host-session` cookie and a new CSRF cookie.",
     request_body = LoginRequest,
     responses(
-        (status = 200, body = LoginResponse),
+        (status = 200, description = "Logged in, or waiting for the second factor when `mfa_required` is true", body = LoginResponse),
         (status = 401, description = "`invalid_credentials`", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "`email_not_verified` or `csrf_failed`", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "`rate_limited`", body = Problem, content_type = "application/problem+json"),
@@ -93,7 +95,7 @@ fn login() {}
     description = "Log in from a mobile app. The token goes in `Authorization: Bearer` from then on.",
     request_body = LoginRequest,
     responses(
-        (status = 200, body = MobileLoginResponse),
+        (status = 200, description = "Logged in, or waiting for the second factor when `mfa_required` is true", body = MobileLoginResponse),
         (status = 401, description = "`invalid_credentials`", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "`email_not_verified`", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "`rate_limited`", body = Problem, content_type = "application/problem+json"),
@@ -161,22 +163,33 @@ fn change_password() {}
     description = "Whether a username is free. Only served when registration reveals existing email addresses.",
     params(UsernameQuery),
     responses(
-        (status = 200, body = UsernameAvailableResponse),
-        (status = 404, description = "Not served", body = Problem, content_type = "application/problem+json"),
+        (status = 200, description = "Whether the username is free", body = UsernameAvailableResponse),
+        (status = 429, description = "`rate_limited`", body = Problem, content_type = "application/problem+json"),
     ))]
 fn username_available() {}
 
-/// Paths and schemas of the local-account routes.
+/// Paths and schemas of the local-account routes, without `GET /username-available`
+/// (see [`UsernameAvailableApi`]).
 #[derive(OpenApi)]
 #[openapi(
     paths(
         csrf, register, login, mobile_login, logout, verify_email, resend_verification,
-        forgot_password, reset_password, change_password, username_available
+        forgot_password, reset_password, change_password
     ),
     components(schemas(Problem, ProblemFieldError)),
     tags((name = "auth", description = "Accounts, sessions and the second factor"))
 )]
 pub struct AuthApi;
+
+/// `GET /username-available`. The route is mounted only when `LocalAuth` reveals
+/// existing email addresses (`LocalAuthBuilder::reveal_existing_email`), so add this
+/// document only then, or use [`AuthRoutes::openapi`](crate::AuthRoutes::openapi).
+#[derive(OpenApi)]
+#[openapi(
+    paths(username_available),
+    components(schemas(Problem, ProblemFieldError))
+)]
+pub struct UsernameAvailableApi;
 
 #[cfg(feature = "mfa")]
 mod mfa {
@@ -186,7 +199,7 @@ mod mfa {
         description = "Complete a login that waits for its second factor. Replaces the session cookie, or returns the new token to bearer clients.",
         request_body = CodeRequest,
         responses(
-            (status = 200, body = MfaVerifyResponse),
+            (status = 200, description = "Signed in under a new session token", body = MfaVerifyResponse),
             (status = 401, description = "`invalid_code`, `mfa_attempts_exceeded` or `unauthenticated`", body = Problem, content_type = "application/problem+json"),
             (status = 429, description = "`rate_limited`", body = Problem, content_type = "application/problem+json"),
         ))]
@@ -194,7 +207,7 @@ mod mfa {
 
     #[utoipa::path(get, path = "/mfa", tag = TAG, operation_id = "get_mfa_status",
         responses(
-            (status = 200, body = MfaStatusResponse),
+            (status = 200, description = "The second factor of the signed-in account", body = MfaStatusResponse),
             (status = 401, description = "`unauthenticated`", body = Problem, content_type = "application/problem+json"),
         ))]
     pub(super) fn status() {}
@@ -202,7 +215,7 @@ mod mfa {
     #[utoipa::path(post, path = "/mfa/totp/start", tag = TAG, operation_id = "start_totp",
         description = "Create a TOTP secret. Shown once.",
         responses(
-            (status = 200, body = TotpSetupResponse),
+            (status = 200, description = "The new secret and its `otpauth://` URI", body = TotpSetupResponse),
             (status = 409, description = "`mfa_already_enabled`", body = Problem, content_type = "application/problem+json"),
         ))]
     pub(super) fn start() {}
@@ -211,7 +224,7 @@ mod mfa {
         description = "Switch TOTP on with a code from the app. The recovery codes are shown once.",
         request_body = CodeRequest,
         responses(
-            (status = 200, body = RecoveryCodesResponse),
+            (status = 200, description = "TOTP is on; the recovery codes, shown once", body = RecoveryCodesResponse),
             (status = 409, description = "`mfa_already_enabled` or `mfa_setup_not_started`", body = Problem, content_type = "application/problem+json"),
             (status = 422, description = "`validation_failed` on `code`", body = Problem, content_type = "application/problem+json"),
         ))]
@@ -231,7 +244,7 @@ mod mfa {
         description = "Replace all recovery codes. Needs a current code or an unused recovery code.",
         request_body = CodeRequest,
         responses(
-            (status = 200, body = RecoveryCodesResponse),
+            (status = 200, description = "The new recovery codes, shown once", body = RecoveryCodesResponse),
             (status = 409, description = "`mfa_not_enabled`", body = Problem, content_type = "application/problem+json"),
             (status = 422, description = "`validation_failed` on `code`", body = Problem, content_type = "application/problem+json"),
             (status = 429, description = "`too_many_attempts`", body = Problem, content_type = "application/problem+json"),
@@ -246,3 +259,92 @@ mod mfa {
 
 #[cfg(feature = "mfa")]
 pub use mfa::MfaApi;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    /// Every document a client generator may be given, as JSON.
+    fn documents() -> Vec<(&'static str, Value)> {
+        let mut documents = vec![
+            ("AuthApi", AuthApi::openapi()),
+            ("UsernameAvailableApi", UsernameAvailableApi::openapi()),
+        ];
+        #[cfg(feature = "mfa")]
+        documents.push(("MfaApi", MfaApi::openapi()));
+        documents
+            .into_iter()
+            .map(|(name, doc)| (name, serde_json::to_value(doc).unwrap()))
+            .collect()
+    }
+
+    fn operations(doc: &Value) -> impl Iterator<Item = (String, &Value)> {
+        doc["paths"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .flat_map(|(path, item)| {
+                item.as_object()
+                    .into_iter()
+                    .flatten()
+                    .map(move |(method, op)| (format!("{method} {path}"), op))
+            })
+    }
+
+    #[test]
+    fn every_response_has_a_description() {
+        for (name, doc) in documents() {
+            for (operation, op) in operations(&doc) {
+                let responses = op["responses"].as_object().expect("responses");
+                assert!(
+                    !responses.is_empty(),
+                    "{name}: {operation} has no responses"
+                );
+                for (status, response) in responses {
+                    let description = response["description"].as_str().unwrap_or("");
+                    assert!(
+                        !description.trim().is_empty(),
+                        "{name}: {operation} {status} has no description"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_parameter_says_where_it_goes() {
+        for (name, doc) in documents() {
+            for (operation, op) in operations(&doc) {
+                let path = operation.split_once(' ').unwrap().1;
+                for parameter in op["parameters"].as_array().into_iter().flatten() {
+                    let pname = parameter["name"].as_str().expect("parameter name");
+                    let place = parameter["in"].as_str().unwrap_or("");
+                    assert!(
+                        ["query", "path", "header", "cookie"].contains(&place),
+                        "{name}: {operation} parameter {pname} has `in: {place}`"
+                    );
+                    assert_eq!(
+                        place == "path",
+                        path.contains(&format!("{{{pname}}}")),
+                        "{name}: {operation} parameter {pname} is `in: {place}`"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn username_check_takes_a_query_parameter() {
+        let doc = serde_json::to_value(UsernameAvailableApi::openapi()).unwrap();
+        let parameters = &doc["paths"]["/username-available"]["get"]["parameters"];
+        assert_eq!(parameters[0]["name"], "username");
+        assert_eq!(parameters[0]["in"], "query");
+        assert_eq!(parameters[0]["required"], true);
+        let auth = serde_json::to_value(AuthApi::openapi()).unwrap();
+        assert!(
+            auth["paths"].get("/username-available").is_none(),
+            "only listed where the route is mounted"
+        );
+    }
+}

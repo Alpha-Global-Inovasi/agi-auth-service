@@ -123,6 +123,7 @@ redacted_debug!(ChangePasswordRequest {});
 /// Query of `GET /username-available`.
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "utoipa", into_params(parameter_in = Query))]
 pub struct UsernameQuery {
     /// The username to check.
     pub username: String,

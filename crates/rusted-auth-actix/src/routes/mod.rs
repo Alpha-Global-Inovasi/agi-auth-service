@@ -244,7 +244,7 @@ impl<U: UserStore, S: SessionStore> AuthRoutes<U, S> {
             );
         }
         #[cfg(feature = "mfa")]
-        if self.state.mfa.is_some() {
+        if self.second_factor_mounted() {
             use handlers::mfa as m;
             cfg.route("/mfa", web::get().to(m::status::<U, S>))
                 .route("/mfa/verify", web::post().to(m::verify::<U, S>))
@@ -256,6 +256,31 @@ impl<U: UserStore, S: SessionStore> AuthRoutes<U, S> {
                     web::post().to(m::regenerate_recovery_codes::<U, S>),
                 );
         }
+    }
+
+    #[cfg(feature = "mfa")]
+    fn second_factor_mounted(&self) -> bool {
+        self.state.mfa.is_some()
+    }
+
+    /// The OpenAPI document of exactly the routes [`configure`](Self::configure)
+    /// mounts: [`AuthApi`](crate::openapi::AuthApi), plus
+    /// [`UsernameAvailableApi`](crate::openapi::UsernameAvailableApi) when registration
+    /// reveals existing email addresses, plus `MfaApi` with a second factor. Paths are
+    /// relative to the scope; nest the document under it, for example with
+    /// `utoipa::openapi::OpenApi::nest("/api/auth", routes.openapi())`.
+    #[cfg(feature = "utoipa")]
+    pub fn openapi(&self) -> utoipa::openapi::OpenApi {
+        use utoipa::OpenApi as _;
+        let mut doc = crate::openapi::AuthApi::openapi();
+        if self.state.local.reveals_existing_email() {
+            doc.merge(crate::openapi::UsernameAvailableApi::openapi());
+        }
+        #[cfg(feature = "mfa")]
+        if self.second_factor_mounted() {
+            doc.merge(crate::openapi::MfaApi::openapi());
+        }
+        doc
     }
 }
 
